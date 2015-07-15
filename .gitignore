@@ -11,10 +11,13 @@
 /log/
 /deps/
 /scripts/log
+/.idea/
+/Mnesia.linc@*
 *.beam
 *.app
 *.o
 *.eqc
 *.plt
+*.iml
 erl_crash.dump
 *~
