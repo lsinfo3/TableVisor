@@ -1,0 +1,10 @@
+{application, tablevisor_ctrl4,
+ [{description, "Controller for TableVisor Multi-Table Emulator"},
+  {vsn, "1.0"},
+  {applications, []},
+  {env, [{manufacturer_desc, <<"Dummy">>},
+         {hardware_desc, <<"Dummy">>},
+         {software_desc, <<"Dummy">>},
+         {serial_number, <<"Dummy">>},
+         {datapath_desc, <<"Dummy">>}]}
+ ]}.
