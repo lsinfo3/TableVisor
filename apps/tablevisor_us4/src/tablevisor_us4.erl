@@ -61,6 +61,11 @@
   ofp_meter_config_request/2,
   ofp_meter_features_request/2]).
 
+%% Handle messages for tablevisor
+-export([
+  tablevisor_flow_add_processtable/1
+]).
+
 %% Handle messages from switches to controller
 -export([
   ofp_packet_in/2
@@ -98,7 +103,7 @@ start(BackendOpts) ->
     {switch_id, SwitchId} = lists:keyfind(switch_id, 1, BackendOpts),
     {datapath_mac, DatapathMac} = lists:keyfind(datapath_mac, 1, BackendOpts),
     {config, Config} = lists:keyfind(config, 1, BackendOpts),
-    ttpsim_switch_init(SwitchId, Config),
+    tablevisor_read_config(SwitchId, Config),
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
     % wait for ttpsim switches
@@ -109,8 +114,6 @@ start(BackendOpts) ->
     linc_us4_groups:initialize(SwitchId),
     FlowState = linc_us4_flow:initialize(SwitchId),
     linc_us4_port:initialize(SwitchId, Config),
-    % initialize dev-table-id forwarding
-    ttpsim_add_devtableid_forwarding(),
     {ok, 4, #state{flow_state = FlowState,
       buffer_state = BufferState,
       switch_id = SwitchId,
@@ -152,19 +155,37 @@ init_controller(Port) ->
 %%% Config + ETS
 %%%-----------------------------------------------------------------------------
 
-ttpsim_switch_init(_SwitchId, Config) ->
+tablevisor_read_config(_SwitchId, Config) ->
   {switch, _SwitchId2, Switch} = lists:keyfind(switch, 1, Config),
   {tablevisor_switches, TTPSimSwitches} = lists:keyfind(tablevisor_switches, 1, Switch),
   ets:new(tablevisor_switch, [public, named_table, {read_concurrency, true}]),
-  [ttpsim_switch_register(Switch2) || Switch2 <- TTPSimSwitches],
+  [tablevisor_create_switch_config(Switch2) || Switch2 <- TTPSimSwitches],
   ets:new(tablevisor_socket, [public, named_table, {read_concurrency, true}]).
 
-ttpsim_switch_register(Switch) ->
+tablevisor_create_switch_config(Switch) ->
   {switch, DataPathId, SwitchConfig} = Switch,
   {tableid, TableId} = lists:keyfind(tableid, 1, SwitchConfig),
-  {devtableid, DevTableId} = lists:keyfind(devtableid, 1, SwitchConfig),
+  {processtable, ProcessTable} = lists:keyfind(processtable, 1, SwitchConfig),
+  {egresstable, EgressTable} = lists:keyfind(egresstable, 1, SwitchConfig),
   {outportmap, OutportMap} = lists:keyfind(outportmap, 1, SwitchConfig),
-  Config = [{dpid, DataPathId}, {tableid, TableId}, {outportmap, OutportMap}, {socket, false}, {pid, false}, {devtableid, DevTableId}],
+  % read back line mapping for connections from last table to switch 0
+  case lists:keyfind(backlinemap, 1, SwitchConfig) of
+    {backlinemap, BackLineMap} ->
+      true;
+    false ->
+      BackLineMap = []
+  end,
+  % generate config
+  Config = [
+    {dpid, DataPathId},
+    {tableid, TableId},
+    {outportmap, OutportMap},
+    {socket, false},
+    {pid, false},
+    {processtable, ProcessTable},
+    {egresstable, EgressTable},
+    {backlinemap, BackLineMap}
+  ],
   ets:insert(tablevisor_switch, {TableId, Config}).
 
 
@@ -199,21 +220,6 @@ set_monitor_data(_ClientPid, _Xid, State) ->
 %%% Handling of messages
 %%%-----------------------------------------------------------------------------
 
-ttpsim_add_devtableid_forwarding() ->
-  RequestedTableList = tablevisor_ctrl4:tablevisor_tables(),
-  AddDevTableIdForwarding = fun(TableId) ->
-    DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, devtableid),
-    case DevTableId of
-      0 ->
-        false;
-      _ ->
-        FlowMod = #ofp_flow_mod{table_id = 0, command = add, hard_timeout = 3600, idle_timeout = 3600, flags = [send_flow_rem], instructions = [#ofp_instruction_goto_table{table_id = DevTableId}]},
-        Message = tablevisor_ctrl4:message(FlowMod),
-        tablevisor_ctrl4:send(1, Message)
-    end
-  end,
-  [AddDevTableIdForwarding(TableId) || TableId <- RequestedTableList].
-
 ofp_features_request(#state{switch_id = SwitchId,
   datapath_mac = DatapathMac} = State,
     #ofp_features_request{}) ->
@@ -231,7 +237,7 @@ ofp_features_request(#state{switch_id = SwitchId,
   {noreply, #state{}} |
   {reply, ofp_message(), #state{}}.
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
-  lager:info("ofp_flow_mod to ttpsim-switch ~p: ~p", [TableId, FlowMod]),
+  %lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
   TableIdList = [TableId],
   % anonymous function to generate flow mod
@@ -265,7 +271,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
             % create output action and append it to apply-action-instruction
             OutputAction = #ofp_action_output{port = Outport},
             % filter all apply-actions from instructions
-            lager:info("Instructions ~p",[FlowMod2#ofp_flow_mod.instructions]),
+            lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
             FilteredInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
             % filter all output-actions form apply-actions
             FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
@@ -642,8 +648,28 @@ ofp_group_features_request(State,
   {reply, Reply, State}.
 
 %%%-----------------------------------------------------------------------------
-%%% TTPSIM-Methods
+%%% TableVisor Functions
 %%%-----------------------------------------------------------------------------
+
+
+tablevisor_flow_add_processtable(TableId) ->
+  ProcessTable = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+  case ProcessTable of
+    0 ->
+      false;
+    _ ->
+      FlowMod = #ofp_flow_mod{
+        table_id = 0,
+        command = add,
+        hard_timeout = 0,
+        idle_timeout = 0,
+        flags = [send_flow_rem],
+        instructions = [#ofp_instruction_goto_table{table_id = ProcessTable}]
+      },
+      Message = tablevisor_ctrl4:message(FlowMod),
+      tablevisor_ctrl4:send(TableId, Message)
+  end.
+
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list

@@ -114,6 +114,8 @@ send_features_request(Socket, Pid) ->
       %lager:info("DataPathId ~p", [DataPathId]),
       {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~p, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
+      % set flow mod to enable process table different 0
+      tablevisor_us4:tablevisor_flow_add_processtable(TableId),
       true
   after 2000 ->
     lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
@@ -320,7 +322,6 @@ send(Socket, Message, Timeout) ->
   receive
     {msg, Reply, Xid} ->
       ReplyBody = Reply#ofp_message.body,
-      %lager:info("Reply ~p", [ReplyBody]),
       {reply, ReplyBody}
   after Timeout ->
     lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
