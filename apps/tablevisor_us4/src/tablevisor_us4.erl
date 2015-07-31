@@ -63,7 +63,8 @@
 
 %% Handle messages for tablevisor
 -export([
-  tablevisor_flow_add_processtable/1
+  tablevisor_flow_add_processtable/1,
+  tablevisor_flow_add_backline/1
 ]).
 
 %% Handle messages from switches to controller
@@ -281,7 +282,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
         end,
         %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
         % read device table id
-        DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId2, devtableid)
+        DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId2, processtable)
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
@@ -670,6 +671,37 @@ tablevisor_flow_add_processtable(TableId) ->
       tablevisor_ctrl4:send(TableId, Message)
   end.
 
+tablevisor_flow_add_backline(TableId) ->
+  case TableId of
+    0 ->
+      ExtractMapPerTable = fun(TableId2) ->
+        BackLineMap = tablevisor_ctrl4:tablevisor_switch_get(TableId2, backlinemap),
+        [{DstPort, OriginPort} || {OriginPort, _SrcPort, DstPort} <- BackLineMap]
+      end,
+      TableList = tablevisor_ctrl4:tablevisor_tables(),
+      List1 = [ExtractMapPerTable(TableId2) || TableId2 <- TableList],
+      List2 = lists:flatten(List1),
+      SendFlowMod = fun(DstPort, OriginPort) ->
+        FlowMod = #ofp_flow_mod{
+          table_id = 0,
+          command = add,
+          hard_timeout = 0,
+          idle_timeout = 0,
+          priority = 1,
+          flags = [send_flow_rem],
+          match = #ofp_match{fields = [#ofp_field{name = in_port, value = <<DstPort>>}]},
+          instructions = [
+            #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OriginPort}]}
+          ]
+        },
+        Message = tablevisor_ctrl4:message(FlowMod),
+        tablevisor_ctrl4:send(TableId, Message)
+      end,
+      [SendFlowMod(DstPort, OriginPort) || {DstPort, OriginPort} <- List2],
+      true;
+    _ ->
+      false
+  end.
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list

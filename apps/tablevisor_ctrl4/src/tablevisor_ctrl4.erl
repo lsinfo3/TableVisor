@@ -116,6 +116,7 @@ send_features_request(Socket, Pid) ->
       lager:info("Registered new Switch DataPath-ID ~p, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_flow_add_processtable(TableId),
+      tablevisor_us4:tablevisor_flow_add_backline(TableId),
       true
   after 2000 ->
     lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
@@ -306,7 +307,7 @@ send(TableId, Message) when is_integer(TableId) ->
   Socket = tablevisor_switch_get(TableId, socket),
   send(Socket, Message);
 send(Socket, Message) ->
-  lager:info("Send (cast) to ~p, message ~p", [Socket, Message]),
+  %lager:info("Send (cast) to ~p, message ~p", [Socket, Message]),
   do_send(Socket, Message),
   {noreply, ok}.
 
@@ -317,7 +318,7 @@ send(Socket, Message, Timeout) ->
   Pid = tablevisor_switch_get(Socket, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
-  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+  %lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
