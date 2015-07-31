@@ -324,6 +324,9 @@ ofp_group_mod(#state{switch_id = SwitchId} = State,
       {reply, ErrorMsg, State}
   end.
 
+%% @doc Send packet in to controller (TableVisor)
+-spec ofp_packet_in(integer(), ofp_packet_in()) ->
+  no_return().
 ofp_packet_in(TableId, Message) ->
   NewMessage = Message#ofp_message{body = Message#ofp_message.body#ofp_packet_in{table_id = TableId}},
   linc_logic:send_to_controllers(0, NewMessage).
