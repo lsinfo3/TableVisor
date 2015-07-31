@@ -61,6 +61,13 @@
   ofp_meter_config_request/2,
   ofp_meter_features_request/2]).
 
+%% Handle messages from switches to controller
+-export([
+  ofp_packet_in/2
+]).
+
+
+
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("linc/include/linc_logger.hrl").
@@ -228,7 +235,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % get table id list
   TableIdList = [TableId],
   % anonymous function to generate flow mod
-  RefactorFlowMod = fun(TableId, FlowMod2) ->
+  RefactorFlowMod = fun(TableId2, FlowMod2) ->
     % extract apply-action-instructions from all instructions
     GotoTableInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
     case GotoTableInstructionList == [] of
@@ -239,7 +246,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
       false ->
         % get first (and only) goto-table-action-instruction
         [GotoTableInstruction | _] = GotoTableInstructionList,
-        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TableId, GotoTableInstruction#ofp_instruction_goto_table.table_id),
+        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TableId2, GotoTableInstruction#ofp_instruction_goto_table.table_id),
         case is_integer(Outport) of
           false ->
             % there is no output port for goto-table defined -> leave untouched
@@ -268,13 +275,13 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
         end,
         %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
         % read device table id
-        DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, devtableid)
+        DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId2, devtableid)
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
   end,
   % build requests
-  Requests = [{TableId2, RefactorFlowMod(TableId2, FlowMod)} || TableId2 <- TableIdList],
+  Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
   % send requests and receives replies
   tv_request(Requests),
   {noreply, State}.
@@ -316,6 +323,10 @@ ofp_group_mod(#state{switch_id = SwitchId} = State,
     {error, ErrorMsg} ->
       {reply, ErrorMsg, State}
   end.
+
+ofp_packet_in(TableId, Message) ->
+  NewMessage = Message#ofp_message{body = Message#ofp_message.body#ofp_packet_in{table_id = TableId}},
+  linc_logic:send_to_controllers(0, NewMessage).
 
 %% @doc Handle a packet received from controller.
 -spec ofp_packet_out(state(), ofp_packet_out()) ->

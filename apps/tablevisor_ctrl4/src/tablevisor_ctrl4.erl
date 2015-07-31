@@ -139,8 +139,7 @@ handle_input(Socket, Message) ->
         false ->
           false;
         TableId ->
-          NewMessage = Message#ofp_message{body = Message#ofp_message.body#ofp_packet_in{table_id = TableId}},
-          linc_logic:send_to_controllers(0, NewMessage)
+          tablevisor_us4:ofp_packet_in(TableId, Message)
       end;
     #ofp_message{} ->
       lager:info("Received message from ~p: ~p", [Socket, Message])
@@ -182,10 +181,10 @@ binary_to_int(Bin) ->
 
 %binary_to_hex(<<>>, Result) ->
 %  Result;
-binary_to_hex(<<B:8, Rest/bits>>, Result) ->
-  Hex = erlang:integer_to_list(B, 16),
-  NewResult = Result ++ ":" ++ Hex,
-  binary_to_hex(Rest, NewResult).
+%binary_to_hex(<<B:8, Rest/bits>>, Result) ->
+%  Hex = erlang:integer_to_list(B, 16),
+%  NewResult = Result ++ ":" ++ Hex,
+%  binary_to_hex(Rest, NewResult).
 
 %%%-----------------------------------------------------------------------------
 %%% ETS Helper
@@ -328,24 +327,24 @@ send(Socket, Message, Timeout) ->
     {error, timeout}
   end.
 
-multisend(TableId, Message, Timeout) when is_integer(TableId) ->
-  Socket = tablevisor_switch_get(TableId, socket),
-  multisend(Socket, Message, Timeout);
-multisend(Socket, Message, Timeout) ->
-  Pid = tablevisor_switch_get(Socket, pid),
-  Pid ! {add_waiter, self()},
-  Xid = Message#ofp_message.xid,
-  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
-  do_send(Socket, Message),
-  receive
-    {msg, Reply, Xid} ->
-      ReplyBody = Reply#ofp_message.body,
-      %lager:info("Reply ~p", [ReplyBody]),
-      {reply, ReplyBody}
-  after Timeout ->
-    lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
-    {error, timeout}
-  end.
+%multisend(TableId, Message, Timeout) when is_integer(TableId) ->
+%  Socket = tablevisor_switch_get(TableId, socket),
+%  multisend(Socket, Message, Timeout);
+%multisend(Socket, Message, Timeout) ->
+%  Pid = tablevisor_switch_get(Socket, pid),
+%  Pid ! {add_waiter, self()},
+%  Xid = Message#ofp_message.xid,
+%  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+%  do_send(Socket, Message),
+%  receive
+%    {msg, Reply, Xid} ->
+%      ReplyBody = Reply#ofp_message.body,
+%      %lager:info("Reply ~p", [ReplyBody]),
+%      {reply, ReplyBody}
+%  after Timeout ->
+%    lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
+%    {error, timeout}
+%  end.
 
 do_send(Socket, Message) when is_tuple(Message) ->
   case of_protocol:encode(Message) of
