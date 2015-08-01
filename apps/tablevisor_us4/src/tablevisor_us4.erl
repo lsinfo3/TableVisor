@@ -249,7 +249,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
       true ->
         % there are no goto-table-instructions -> leave untouched
         FinalInstructionList = FlowMod2#ofp_flow_mod.instructions,
-        DevTableId = FlowMod2#ofp_flow_mod.table_id;
+        DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId2, processtable);
       false ->
         % get first (and only) goto-table-action-instruction
         [GotoTableInstruction | _] = GotoTableInstructionList,
@@ -687,7 +687,7 @@ tablevisor_flow_add_backline(TableId) ->
           command = add,
           hard_timeout = 0,
           idle_timeout = 0,
-          priority = 1,
+          priority = 100,
           flags = [send_flow_rem],
           match = #ofp_match{fields = [#ofp_field{name = in_port, value = <<DstPort>>}]},
           instructions = [
