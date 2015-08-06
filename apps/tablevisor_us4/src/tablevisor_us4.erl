@@ -63,8 +63,7 @@
 
 %% Handle messages for tablevisor
 -export([
-  tablevisor_flow_add_processtable/1,
-  tablevisor_flow_add_backline/1
+  tablevisor_init_connection/1
 ]).
 
 %% Handle messages from switches to controller
@@ -158,34 +157,34 @@ init_controller(Port) ->
 
 tablevisor_read_config(_SwitchId, Config) ->
   {switch, _SwitchId2, Switch} = lists:keyfind(switch, 1, Config),
-  {tablevisor_switches, TTPSimSwitches} = lists:keyfind(tablevisor_switches, 1, Switch),
+  {tablevisor_switches, TVSwitches} = lists:keyfind(tablevisor_switches, 1, Switch),
   ets:new(tablevisor_switch, [public, named_table, {read_concurrency, true}]),
-  [tablevisor_create_switch_config(Switch2) || Switch2 <- TTPSimSwitches],
+  [tablevisor_create_switch_config(Switch2) || Switch2 <- TVSwitches],
   ets:new(tablevisor_socket, [public, named_table, {read_concurrency, true}]).
 
 tablevisor_create_switch_config(Switch) ->
-  {switch, DataPathId, SwitchConfig} = Switch,
-  {tableid, TableId} = lists:keyfind(tableid, 1, SwitchConfig),
+  {table, TableId, SwitchConfig} = Switch,
+  {dpid, DpId} = lists:keyfind(dpid, 1, SwitchConfig),
   {processtable, ProcessTable} = lists:keyfind(processtable, 1, SwitchConfig),
   {egresstable, EgressTable} = lists:keyfind(egresstable, 1, SwitchConfig),
   {outportmap, OutportMap} = lists:keyfind(outportmap, 1, SwitchConfig),
   % read back line mapping for connections from last table to switch 0
-  case lists:keyfind(backlinemap, 1, SwitchConfig) of
-    {backlinemap, BackLineMap} ->
+  case lists:keyfind(flowmods, 1, SwitchConfig) of
+    {flowmods, FlowMods} ->
       true;
     false ->
-      BackLineMap = []
+      FlowMods = []
   end,
   % generate config
   Config = [
-    {dpid, DataPathId},
+    {dpid, DpId},
     {tableid, TableId},
     {outportmap, OutportMap},
     {socket, false},
     {pid, false},
     {processtable, ProcessTable},
     {egresstable, EgressTable},
-    {backlinemap, BackLineMap}
+    {flowmods, FlowMods}
   ],
   ets:insert(tablevisor_switch, {TableId, Config}).
 
@@ -439,7 +438,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   TableIdList = GetTableIdList(Request#ofp_flow_stats_request.table_id),
   % anonymous function to generate indivudal table request
   GetTableRequest = fun(TableId, Request2) ->
-    DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, devtableid),
+    DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
     Request2#ofp_flow_stats_request{table_id = DevTableId}
   end,
   % build requests
@@ -652,56 +651,111 @@ ofp_group_features_request(State,
 %%% TableVisor Functions
 %%%-----------------------------------------------------------------------------
 
+tablevisor_init_connection(TableId) ->
+  FlowMods = tablevisor_ctrl4:tablevisor_switch_get(TableId, flowmods),
+  % create instructions + actions
+  CreateInstructions = fun(Actions) ->
+    FunR = fun([], InstructionList, _) ->
+        InstructionList;
+      ([Action | Actions2], InstructionList, Fun) ->
+        case Action of
+          {gototable, TargetTableId} ->
+            Instruction = #ofp_instruction_goto_table{table_id = TargetTableId};
+          {output, OutputPort} ->
+            Instruction = #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OutputPort}]};
+          {_, _} ->
+            Instruction = false
+        end,
+        Fun(Actions2, [Instruction  | InstructionList], Fun)
+    end,
+    FunR(Actions, [], FunR)
+  end,
+  % create matches
+  CreateMatches = fun(Matches) ->
+    FunR = fun([], MatchesList, _) ->
+        MatchesList;
+      ([Match | Matches2], MatchesList, Fun) ->
+        case Match of
+          {inport, InPort} ->
+            MatchField = #ofp_field{name = in_port, value = <<InPort>>};
+          {_, _} ->
+            MatchField = false
+        end,
+        Fun(Matches2, [MatchField  | MatchesList], Fun)
+    end,
+    FunR(Matches, [], FunR)
+  end,
+  % create flow entry
+  CreateFlowMod = fun(FlowModConfig) ->
+    % read and set values
+    case lists:keyfind(tableid, 1, FlowModConfig) of
+      {tableid, TableId2} -> false;
+      false -> TableId2 = 0
+    end,
+    case lists:keyfind(priority, 1, FlowModConfig) of
+      {priority, Priority} -> false;
+      false -> Priority = 100
+    end,
+    case lists:keyfind(match, 1, FlowModConfig) of
+      {match, Matches} -> MatchList = CreateMatches(Matches);
+      false -> MatchList = []
+    end,
+    case lists:keyfind(action, 1, FlowModConfig) of
+      {action, Actions} -> InstructionList = CreateInstructions(Actions);
+      false -> InstructionList = []
+    end,
+    % create flow mod
+    FlowMod = #ofp_flow_mod{
+      table_id = TableId2,
+      command = add,
+      hard_timeout = 0,
+      idle_timeout = 0,
+      priority = Priority,
+      flags = [send_flow_rem],
+      match = #ofp_match{fields = MatchList},
+      instructions = InstructionList
+    },
+    FlowMod
+  end,
+  % send flow mod
+  SendFlowMod = fun(FlowModConfig) ->
+    FlowMod = CreateFlowMod(FlowModConfig),
+    Message = tablevisor_ctrl4:message(FlowMod),
+    tablevisor_ctrl4:send(TableId, Message)
+  end,
+  [SendFlowMod(FlowModConfig) || FlowModConfig <- FlowMods].
 
-tablevisor_flow_add_processtable(TableId) ->
-  ProcessTable = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
-  case ProcessTable of
-    0 ->
-      false;
-    _ ->
-      FlowMod = #ofp_flow_mod{
-        table_id = 0,
-        command = add,
-        hard_timeout = 0,
-        idle_timeout = 0,
-        flags = [send_flow_rem],
-        instructions = [#ofp_instruction_goto_table{table_id = ProcessTable}]
-      },
-      Message = tablevisor_ctrl4:message(FlowMod),
-      tablevisor_ctrl4:send(TableId, Message)
-  end.
-
-tablevisor_flow_add_backline(TableId) ->
-  case TableId of
-    0 ->
-      ExtractMapPerTable = fun(TableId2) ->
-        BackLineMap = tablevisor_ctrl4:tablevisor_switch_get(TableId2, backlinemap),
-        [{DstPort, OriginPort} || {OriginPort, _SrcPort, DstPort} <- BackLineMap]
-      end,
-      TableList = tablevisor_ctrl4:tablevisor_tables(),
-      List1 = [ExtractMapPerTable(TableId2) || TableId2 <- TableList],
-      List2 = lists:flatten(List1),
-      SendFlowMod = fun(DstPort, OriginPort) ->
-        FlowMod = #ofp_flow_mod{
-          table_id = 0,
-          command = add,
-          hard_timeout = 0,
-          idle_timeout = 0,
-          priority = 100,
-          flags = [send_flow_rem],
-          match = #ofp_match{fields = [#ofp_field{name = in_port, value = <<DstPort>>}]},
-          instructions = [
-            #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OriginPort}]}
-          ]
-        },
-        Message = tablevisor_ctrl4:message(FlowMod),
-        tablevisor_ctrl4:send(TableId, Message)
-      end,
-      [SendFlowMod(DstPort, OriginPort) || {DstPort, OriginPort} <- List2],
-      true;
-    _ ->
-      false
-  end.
+%% tablevisor_flow_add_backline(TableId) ->
+%%   case TableId of
+%%     0 ->
+%%       ExtractMapPerTable = fun(TableId2) ->
+%%         BackLineMap = tablevisor_ctrl4:tablevisor_switch_get(TableId2, backlinemap),
+%%         [{DstPort, OriginPort} || {OriginPort, _SrcPort, DstPort} <- BackLineMap]
+%%       end,
+%%       TableList = tablevisor_ctrl4:tablevisor_tables(),
+%%       List1 = [ExtractMapPerTable(TableId2) || TableId2 <- TableList],
+%%       List2 = lists:flatten(List1),
+%%       SendFlowMod = fun(DstPort, OriginPort) ->
+%%         FlowMod = #ofp_flow_mod{
+%%           table_id = 200,
+%%           command = add,
+%%           hard_timeout = 0,
+%%           idle_timeout = 0,
+%%           priority = 100,
+%%           flags = [send_flow_rem],
+%%           match = #ofp_match{fields = [#ofp_field{name = in_port, value = <<DstPort>>}]},
+%%           instructions = [
+%%             #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OriginPort}]}
+%%           ]
+%%         },
+%%         Message = tablevisor_ctrl4:message(FlowMod),
+%%         tablevisor_ctrl4:send(TableId, Message)
+%%       end,
+%%       [SendFlowMod(DstPort, OriginPort) || {DstPort, OriginPort} <- List2],
+%%       true;
+%%     _ ->
+%%       false
+%%   end.
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list

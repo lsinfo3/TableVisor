@@ -107,7 +107,7 @@ send_features_request(Socket, Pid) ->
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
-      lager:debug("Reply ~p", [Reply]),
+      lager:info("Received features reply from ~p, message ~p", [Socket, Reply]),
       Body = Reply#ofp_message.body,
       DataPathMac = Body#ofp_features_reply.datapath_mac,
       DataPathId = binary_to_int(DataPathMac),
@@ -115,8 +115,7 @@ send_features_request(Socket, Pid) ->
       {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~p, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
       % set flow mod to enable process table different 0
-      tablevisor_us4:tablevisor_flow_add_processtable(TableId),
-      tablevisor_us4:tablevisor_flow_add_backline(TableId),
+      tablevisor_us4:tablevisor_init_connection(TableId),
       true
   after 2000 ->
     lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
@@ -238,6 +237,7 @@ tablevisor_switch_connect(DataPathId, Socket, Pid) ->
 tablevisor_switch_get(TableId, Key) when is_integer(TableId) ->
   try
     Config = ets:lookup_element(tablevisor_switch, TableId, 2),
+    % lager:error("Key ~p, Config ~p",[Key, Config]),
     {Key, Value} = lists:keyfind(Key, 1, Config),
     Value
   catch
