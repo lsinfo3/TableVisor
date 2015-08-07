@@ -532,7 +532,7 @@ tv_request(Requests, Timeout) ->
   % wait for response
   receive
     Any ->
-      lager:info("Responses: ~p", [Any]),
+      %lager:info("Responses: ~p", [Any]),
       Any
   after Timeout ->
     lager:error("Timeout"),
@@ -541,13 +541,14 @@ tv_request(Requests, Timeout) ->
 
 tablevisor_receiver(0, _Timeout, Caller, Replies) ->
   % all replies are collected, return all replies to caller process (tv_request)
-  % lager:info("Receiver 0: ~p", [Replies]),
+  %lager:info("Receiver 0: ~p", [Replies]),
   Caller ! Replies;
 tablevisor_receiver(N, Timeout, Caller, Replies) ->
   receive
     {ok, TableId, Reply} ->
       % add reply to list of replies
       Replies2 = [{TableId, Reply} | Replies],
+      % lager:info("Replies2: ~p",[Replies2]),
       % recursivly restart new receiver
       tablevisor_receiver(N - 1, Timeout, Caller, Replies2)
   after Timeout ->

@@ -11,35 +11,25 @@ Sample usage: $1 -d -s table_miss -r \"127.0.0.1:6653\""
 
 
 parse_opts() {
-    while getopts ":ds:p:r:" OPT
+    DISTRIBUTE_FLOWS=0
+    ALL_TABLE_REQUEST=0
+    while getopts ":n:t:f:da" OPT
     do
         case $OPT in
+            n)
+                FILENAME=${OPTARG}
+                ;;
+            t)
+                TABLE=${OPTARG}
+                ;;
+            f)
+                FLOWS=${OPTARG}
+                ;;
             d)
-                DEBUG=true
+                DISTRIBUTE_FLOWS=1
                 ;;
-            s)
-                SCENARIO=${OPTARG}
-                ;;
-            p)
-                if ! [ -z ${PORT_OR_REMOTE_PEER} ]; then
-                    echo "Option -${OPT} cannot be used with -r"
-                    help $0
-                    exit 1
-                fi
-                PORT_OR_REMOTE_PEER=${OPTARG}
-                if ! [  "$PORT_OR_REMOTE_PEER" -eq "$PORT_OR_REMOTE_PEER" ] 2>/dev/null; then
-                    echo "The argument for -${OPT} has to be an integer"
-                    help $0
-                    exit 1
-                fi
-                ;;
-            r)
-                if ! [ -z $PORT_OR_REMOTE_PEER ]; then
-                    echo "Option -${OPT} cannot be used with -p"
-                    help $0
-                    exit 1
-                fi
-                PORT_OR_REMOTE_PEER=${OPTARG}
+            a)
+                ALL_TABLE_REQUEST=1
                 ;;
             \?)
                 echo "Invalid option: -${OPTARG}"
@@ -57,28 +47,7 @@ parse_opts() {
 
 run_controller() {
     erlc tablevisortest_ctrl4.erl -pa ../deps/lager/ebin -pa ../deps/*/ebin -pa ../apps/*/ebin
-
-    if [ -z ${SCENARIO} ]; then
-        if [ -z ${PORT_OR_REMOTE_PEER} ]; then
-            ERL_EVAL=ERL_EVAL="tablevisortest_ctrl4:start()"
-        else
-            ERL_EVAL="tablevisortest_ctrl4:start(\"${PORT_OR_REMOTE_PEER}\")"
-        fi
-    else
-        if [ -z ${PORT_OR_REMOTE_PEER} ]; then
-            START_ARGS="${SCENARIO}"
-        else
-            START_ARGS="\"${PORT_OR_REMOTE_PEER}\", ${SCENARIO}"
-        fi
-        ERL_EVAL="tablevisortest_ctrl4:start_scenario(${START_ARGS})"
-    fi
-
-    if  [ -z ${DEBUG} ]; then
-        ERL_EVAL=${ERL_EVAL}"."
-    else
-        ERL_EVAL=${ERL_EVAL}", lager:set_loglevel(lager_console_backend, debug)."
-    fi
-
+    ERL_EVAL=ERL_EVAL="tablevisortest_ctrl4:start(\"${FILENAME}\",\"${TABLE}\",\"${ALL_TABLE_REQUEST}\",\"${FLOWS}\",\"${DISTRIBUTE_FLOWS}\")"
     erl -pa ../deps/*/ebin -eval "`echo ${ERL_EVAL}`"
 }
 
