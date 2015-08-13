@@ -174,7 +174,7 @@ performance_test(Socket, RefTime, TableId) ->
       table_id = TableId
     }
   },
-  test_sender(Socket, Message, RefTime, 1000, 50).
+  test_sender(Socket, Message, RefTime, 1000, 100).
 
 send_initial_flow_mod(_, TableId, 0) ->
   lager:info("Initial FlowMods for Table ~p finished", [TableId]);
@@ -193,8 +193,10 @@ initial_flow_mod(TableId) ->
     priority = 0,
     flags = [],
     match = #ofp_match{fields = [
-      #ofp_field{name = eth_src, value = get_random_mac()},
-      #ofp_field{name = eth_dst, value = get_random_mac()}
+      #ofp_field{name = eth_type, value = <<8,0>>},
+      #ofp_field{name = ipv4_src, value = get_random_ip()},
+      #ofp_field{name = ipv4_dst, value = get_random_ip()}
+      %#ofp_field{name = eth_dst, value = get_random_mac()}
     ]},
     instructions = [
       #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = 1}]}
@@ -203,16 +205,21 @@ initial_flow_mod(TableId) ->
   %lager:info("FlowMod ~p",[FlowMod]),
   message(FlowMod).
 
+get_random_ip() ->
+  <<(random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8>>.
+
 get_random_mac() ->
   <<(random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8, (random:uniform(255)):8>>.
 
 test_sender(_, _, _, 0, _) ->
   lager:info("Test finished.");
 test_sender(Socket, Message, RefTime, Count, Delay) ->
-  TimeStamp = generate_timestamp() - RefTime,
-  Message2 = Message#ofp_message{xid = TimeStamp},
-  do_send(Socket, Message2),
-  lager:info("~p: send", [TimeStamp]),
+  spawn(fun() ->
+    TimeStamp = generate_timestamp() - RefTime,
+    Message2 = Message#ofp_message{xid = TimeStamp},
+    do_send(Socket, Message2),
+    lager:info("~p: send", [TimeStamp])
+  end),
   timer:sleep(Delay),
   test_sender(Socket, Message, RefTime, Count - 1, Delay).
 
@@ -305,11 +312,13 @@ handle(#cstate{parent = Parent, socket = Socket,
       handle(State, RefTime, Filename);
     {msg, Socket, #ofp_message{body = #ofp_flow_stats_reply{}} = Message} ->
       % tablevisor evaluation begin
-      Xid = Message#ofp_message.xid,
-      RTT = generate_timestamp() - RefTime - Xid,
-      lager:info("~p: receive (~p msec)", [Xid, RTT / 1000]),
-      file:write_file(("/home/sherrnleben/tvperformance/" ++ Filename ++ ".csv"), io_lib:fwrite("~p;~p~n", [Xid, RTT]), [append]),
-      % tablevisor evaluation end
+      spawn(fun() ->
+        Xid = Message#ofp_message.xid,
+        RTT = generate_timestamp() - RefTime - Xid,
+        lager:info("~p: receive (~p msec)", [Xid, RTT / 1000]),
+        file:write_file(("/home/sherrnleben/tvperformance/" ++ Filename ++ ".csv"), io_lib:fwrite("~p;~p~n", [Xid, RTT]), [append])
+        % tablevisor evaluation end
+      end),
       Parent ! {message, Message},
       handle(State, RefTime, Filename);
     {msg, Socket, Message} ->
