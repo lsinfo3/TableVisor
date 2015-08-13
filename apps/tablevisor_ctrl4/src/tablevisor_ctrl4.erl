@@ -44,28 +44,40 @@ accept(LSocket) ->
   {ok, Socket} = gen_tcp:accept(LSocket),
   Pid = spawn_link(fun() ->
     inet:setopts(Socket, [{active, once}]),
-    handle_socket(Socket, [])
+    handle_socket(Socket, [], <<>>)
   end),
   Pid ! {new},
   ok = gen_tcp:controlling_process(Socket, Pid),
   accept(LSocket).
 
 %% The echo client process.
-handle_socket(Socket, Waiters) ->
+handle_socket(Socket, Waiters, Data1) ->
   ok = inet:setopts(Socket, [{active, once}]),
   receive
     {tcp, Socket, Data} ->
+      Data2 = <<Data1/binary, Data/binary>>,
+      <<_Version:8, _TypeInt:8, Length:16, _XID:32, _Binary2/bytes>> = Data2,
+      case Length of
+        N when N > byte_size(Data2) ->
+          lager:debug("Header-Length: ~p, Payload-Length: ~p",[Length, byte_size(Data)]),
+          handle_socket(Socket, Waiters, Data2);
+        N when N < byte_size(Data2) ->
+          lager:error("multiple OpenFlow messages in one TCP bytestream");
+        _ ->
+          true
+      end,
       {ok, Parser} = ofp_parser:new(4),
-      Parsed = ofp_parser:parse(Parser, Data),
+      lager:debug("InputData from ~p: ~p",[Socket, Data]),
+      Parsed = ofp_parser:parse(Parser, Data2),
       case Parsed of
         {ok, _, _} ->
           true;
         {error, Exception} ->
           lager:error("Error while parsing ~p because ~p", [Data, Exception]),
-          handle_socket(Socket, Waiters)
+          handle_socket(Socket, Waiters, <<>>)
       end,
       {ok, _NewParser, Messages} = Parsed,
-      %lager:debug("Received messages ~p", [Messages]),
+      lager:debug("Received messages ~p", [Messages]),
       FilteredWaiters = filter_waiters(Waiters),
       lists:foreach(fun(Message) ->
         Xid = Message#ofp_message.xid,
@@ -74,7 +86,7 @@ handle_socket(Socket, Waiters) ->
           handle_input(Socket, Message)
         end)
       end, Messages),
-      handle_socket(Socket, FilteredWaiters);
+      handle_socket(Socket, FilteredWaiters, <<>>);
   % close tcp socket by client (rb)
     {tcp_closed, Socket} ->
       tablevisor_switch_remove(Socket),
@@ -86,13 +98,13 @@ handle_socket(Socket, Waiters) ->
       spawn_link(fun() ->
         send_features_request(Socket, ListenerPid)
       end),
-      handle_socket(Socket, Waiters);
+      handle_socket(Socket, Waiters, <<>>);
     {add_waiter, Waiter} ->
       NewWaiters = [Waiter | Waiters],
-      handle_socket(Socket, NewWaiters);
+      handle_socket(Socket, NewWaiters, <<>>);
     Other ->
       lager:error("Received unknown signal ~p", [Other]),
-      handle_socket(Socket, Waiters)
+      handle_socket(Socket, Waiters, <<>>)
   end.
 
 filter_waiters(Waiters) ->
