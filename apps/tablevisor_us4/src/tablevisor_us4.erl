@@ -263,7 +263,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
             case ApplyActionInstructionList == [] of
               true ->
                 % no apply-action-instruction -> create new apply-action-instruction
-                ApplyActionInstruction = #ofp_instruction_apply_actions{};
+                ApplyActionInstruction = #ofp_instruction_apply_actions{ actions = [] };
               false ->
                 % the the first (and only) apply-action-instruction
                 [ApplyActionInstruction | _] = ApplyActionInstructionList
