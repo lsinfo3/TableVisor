@@ -68,6 +68,7 @@
 
 %% Handle messages from switches to controller
 -export([
+  ofp_error_msg/1,
   ofp_packet_in/2
 ]).
 
@@ -107,7 +108,7 @@ start(BackendOpts) ->
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
     % wait for ttpsim switches
-    timer:sleep(12000),
+    timer:sleep(60000),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     BufferState = linc_buffer:initialize(SwitchId),
     {ok, _Pid} = linc_us4_sup:start_backend_sup(SwitchId),
@@ -271,7 +272,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
             % create output action and append it to apply-action-instruction
             OutputAction = #ofp_action_output{port = Outport},
             % filter all apply-actions from instructions
-            lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
+            % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
             FilteredInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
             % filter all output-actions form apply-actions
             FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
@@ -336,6 +337,12 @@ ofp_group_mod(#state{switch_id = SwitchId} = State,
 ofp_packet_in(TableId, Message) ->
   NewMessage = Message#ofp_message{body = Message#ofp_message.body#ofp_packet_in{table_id = TableId}},
   linc_logic:send_to_controllers(0, NewMessage).
+
+%% @doc Send error message to controller (TableVisor)
+-spec ofp_error_msg(ofp_error_msg()) ->
+  no_return().
+ofp_error_msg(Message) ->
+  linc_logic:send_to_controllers(0, Message).
 
 %% @doc Handle a packet received from controller.
 -spec ofp_packet_out(state(), ofp_packet_out()) ->
@@ -546,6 +553,7 @@ tablevisor_receiver(0, _Timeout, Caller, Replies) ->
 tablevisor_receiver(N, Timeout, Caller, Replies) ->
   receive
     {ok, TableId, Reply} ->
+      %lager:info("Received Reply from ~p: ~p",[TableId, Reply]),
       % add reply to list of replies
       Replies2 = [{TableId, Reply} | Replies],
       % recursivly restart new receiver

@@ -57,9 +57,9 @@ handle_socket(Socket, Waiters, Data1) ->
     {tcp, Socket, Data} ->
       Data2 = <<Data1/binary, Data/binary>>,
       <<_Version:8, _TypeInt:8, Length:16, _XID:32, _Binary2/bytes>> = Data2,
+      % lager:info("Version ~p, TypeInt ~p, Length ~p, Xid ~p, calculated Length ~p",[Version, TypeInt, Length, XID, byte_size(Data)]),
       case Length of
         N when N > byte_size(Data2) ->
-          lager:debug("Header-Length: ~p, Payload-Length: ~p",[Length, byte_size(Data)]),
           handle_socket(Socket, Waiters, Data2);
         N when N < byte_size(Data2) ->
           lager:error("multiple OpenFlow messages in one TCP bytestream");
@@ -140,6 +140,9 @@ handle_input(Socket, Message) ->
     #ofp_message{body = #ofp_error_msg{type = hello_failed, code = incompatible}} ->
       lager:error("Received hello failed from ~p: ~p", [Socket, Message]),
       gen_tcp:close(Socket);
+    #ofp_message{body = #ofp_error_msg{}} ->
+      lager:info("Received error message from ~p: ~p", [Socket, Message]),
+      tablevisor_us4:ofp_error_msg(Message);
     #ofp_message{body = #ofp_echo_request{}} ->
       lager:debug("Received echo request from ~p: ~p", [Socket, Message]),
       do_send(Socket, message(echo_reply(), Xid));
