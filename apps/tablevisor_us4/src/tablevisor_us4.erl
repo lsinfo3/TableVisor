@@ -167,7 +167,7 @@ tablevisor_create_switch_config(Switch) ->
   {table, TableId, SwitchConfig} = Switch,
   {dpid, DpId} = lists:keyfind(dpid, 1, SwitchConfig),
   {processtable, ProcessTable} = lists:keyfind(processtable, 1, SwitchConfig),
-  {egresstable, EgressTable} = lists:keyfind(egresstable, 1, SwitchConfig),
+  % {egresstable, EgressTable} = lists:keyfind(egresstable, 1, SwitchConfig),
   {outportmap, OutportMap} = lists:keyfind(outportmap, 1, SwitchConfig),
   % read back line mapping for connections from last table to switch 0
   case lists:keyfind(flowmods, 1, SwitchConfig) of
@@ -184,7 +184,7 @@ tablevisor_create_switch_config(Switch) ->
     {socket, false},
     {pid, false},
     {processtable, ProcessTable},
-    {egresstable, EgressTable},
+    % {egresstable, EgressTable},
     {flowmods, FlowMods}
   ],
   ets:insert(tablevisor_switch, {TableId, Config}).
