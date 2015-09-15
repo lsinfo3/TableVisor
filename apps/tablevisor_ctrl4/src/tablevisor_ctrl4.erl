@@ -300,8 +300,13 @@ tablevisor_tables() ->
 
 tablevisor_switch_get_outport(SrcTableId, DstTableId) ->
   OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
-  {DstTableId, Outport} = lists:keyfind(DstTableId, 1, OutportMap),
-  Outport.
+  Result = lists:keyfind(DstTableId, 1, OutportMap),
+  case Result of
+    {DstTableId, Outport} ->
+      Outport;
+    false ->
+      false
+  end.
 
 tablevisor_switch_get_gototable(SrcTableId, OutPort) ->
   OutportMap = tablevisor_switch_get(SrcTableId, outportmap),

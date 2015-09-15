@@ -107,8 +107,8 @@ start(BackendOpts) ->
     tablevisor_read_config(SwitchId, Config),
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
-    % wait for ttpsim switches
-    timer:sleep(60000),
+    % wait for hardware switches
+    timer:sleep(10000),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     BufferState = linc_buffer:initialize(SwitchId),
     {ok, _Pid} = linc_us4_sup:start_backend_sup(SwitchId),
@@ -685,7 +685,15 @@ tablevisor_init_connection(TableId) ->
       ([Match | Matches2], MatchesList, Fun) ->
         case Match of
           {inport, InPort} ->
-            MatchField = #ofp_field{name = in_port, value = <<InPort>>};
+            MatchField = #ofp_field{name = in_port, value = <<InPort:32>>};
+          {vlanid, VlanId} ->
+            MatchField = #ofp_field{name = vlan_vid, value = <<VlanId:16>>};
+          {ethdst, EthDst} ->
+            MatchField = #ofp_field{name = eth_dst, value = <<EthDst:48>>};
+          {ethertype, EtherType} ->
+            MatchField = #ofp_field{name = eth_type, value = <<EtherType:16>>};
+          {metadata, Metadata} ->
+            MatchField = #ofp_field{name = metadata, value = <<Metadata:64>>};
           {_, _} ->
             MatchField = false
         end,
@@ -704,6 +712,10 @@ tablevisor_init_connection(TableId) ->
       {priority, Priority} -> false;
       false -> Priority = 100
     end,
+    case lists:keyfind(outport, 1, FlowModConfig) of
+      {outport, OutPort} -> false;
+      false -> OutPort = 0
+    end,
     case lists:keyfind(match, 1, FlowModConfig) of
       {match, Matches} -> MatchList = CreateMatches(Matches);
       false -> MatchList = []
@@ -719,6 +731,7 @@ tablevisor_init_connection(TableId) ->
       hard_timeout = 0,
       idle_timeout = 0,
       priority = Priority,
+      out_port = OutPort,
       flags = [send_flow_rem],
       match = #ofp_match{fields = MatchList},
       instructions = InstructionList
