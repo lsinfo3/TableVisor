@@ -67,7 +67,7 @@ handle_socket(Socket, Waiters, Data1) ->
           true
       end,
       {ok, Parser} = ofp_parser:new(4),
-      lager:debug("InputData from ~p: ~p",[Socket, Data]),
+      lager:debug("InputData from ~p: ~p", [Socket, Data]),
       Parsed = ofp_parser:parse(Parser, Data2),
       case Parsed of
         {ok, _, _} ->
@@ -126,13 +126,14 @@ send_features_request(Socket, Pid) ->
       %lager:info("DataPathId ~p", [DataPathId]),
       {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~p, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
+      tablevisor_us4:tablevisor_log("~sRegistered switch with datapath id ~p for ~stable id ~p", [tablevisor_us4:tvlc(blue), DataPathId, tablevisor_us4:tvlc(blue, b), TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(TableId),
-      true
-  after 2000 ->
-    lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
-    false
-  end.
+true
+after 2000 ->
+lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
+false
+end .
 
 handle_input(Socket, Message) ->
   Xid = Message#ofp_message.xid,

@@ -63,7 +63,12 @@
 
 %% Handle messages for tablevisor
 -export([
-  tablevisor_init_connection/1
+  tablevisor_init_connection/1,
+  tablevisor_log/1,
+  tablevisor_log/2,
+  tvlc/1,
+  tvlc/2,
+  tvlc/3
 ]).
 
 %% Handle messages from switches to controller
@@ -100,6 +105,8 @@
 -spec start(any()) -> {ok, Version :: 4, state()}.
 start(BackendOpts) ->
   try
+    %lager:trace_file("rel/log/tablevisor.log", [{vhost, "example.com"}], warning),
+    %lager:warning([{vhost, "example.com"}], "~s[32m Permission denied to~n", [ [27] ]),
     % initialize controller for table type pattern simulation
     {switch_id, SwitchId} = lists:keyfind(switch_id, 1, BackendOpts),
     {datapath_mac, DatapathMac} = lists:keyfind(datapath_mac, 1, BackendOpts),
@@ -107,9 +114,12 @@ start(BackendOpts) ->
     tablevisor_read_config(SwitchId, Config),
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
+    tablevisor_log("~s--- TableVisor started ---", [tvlc(red, b)]),
+    tablevisor_log("~sStart controller endpoint and wait for connection establishment of the hardware switches", [tvlc(red)]),
     % wait for hardware switches
     timer:sleep(10000),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
+    tablevisor_log("~sStart switch endpoint and connect to external controller", [tvlc(red)]),
     BufferState = linc_buffer:initialize(SwitchId),
     {ok, _Pid} = linc_us4_sup:start_backend_sup(SwitchId),
     linc_us4_groups:initialize(SwitchId),
@@ -238,6 +248,8 @@ ofp_features_request(#state{switch_id = SwitchId,
   {noreply, #state{}} |
   {reply, ofp_message(), #state{}}.
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
+  LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
+  tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
   %lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
   TableIdList = [TableId],
@@ -264,7 +276,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
             case ApplyActionInstructionList == [] of
               true ->
                 % no apply-action-instruction -> create new apply-action-instruction
-                ApplyActionInstruction = #ofp_instruction_apply_actions{ actions = [] };
+                ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
               false ->
                 % the the first (and only) apply-action-instruction
                 [ApplyActionInstruction | _] = ApplyActionInstructionList
@@ -289,6 +301,12 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   end,
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
+  % log
+  LogFlow = fun(TableId, FlowMod) ->
+    LogFlow2 = tablevisor_logformat_flowmod(FlowMod),
+    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId, LogFlow2])
+  end,
+  [LogFlow(TableId, FlowMod3) || {TableId, FlowMod3} <- Requests],
   % send requests and receives replies
   tv_request(Requests),
   {noreply, State}.
@@ -431,7 +449,8 @@ ofp_desc_request(State, #ofp_desc_request{}) ->
 %% @doc Get flow entry statistics.
 -spec ofp_flow_stats_request(state(), ofp_flow_stats_request()) ->
   {reply, ofp_flow_stats_reply(), #state{}}.
-ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_request{} = Request) ->
+ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_request{table_id = TableId10} = Request) ->
+  tablevisor_log("~sReceived ~sflow-stats-request~s from controller: Requesting table ~p", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), TableId10]),
   % anonymous function for getting table id list
   GetTableIdList = fun(TableId) ->
     case TableId of
@@ -450,6 +469,11 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   end,
   % build requests
   Requests = [{TableId2, GetTableRequest(TableId2, Request)} || TableId2 <- TableIdList],
+  % log
+  [begin
+     tablevisor_log("~sSend ~sflow-stats-request~s to switch with table ~p: Requesting table ~p", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId11, TableId12])
+   end
+    || {TableId11, #ofp_flow_stats_request{table_id = TableId12}} <- Requests],
   % send requests and receives replies
   Replies = tv_request(Requests, 2000),
   % anonymous function to refactor flow entries
@@ -504,6 +528,15 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     % insert instructions into flow entry and replace tableid
     FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
   end,
+  % log
+  [begin
+     StatsBody = Reply12#ofp_flow_stats_reply.body,
+     [begin
+        LogFlow = tablevisor_logformat_flowstats(Stats),
+        tablevisor_log("~sReceived ~sflow-stats-reply~s from switch with table ~p: ~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId12, LogFlow])
+      end || Stats <- StatsBody]
+   end
+    || {TableId12, Reply12} <- Replies],
   % anonymous function to separate flow entries
   SeparateFlowEntries = fun(TableId, Reply) ->
     Body = Reply#ofp_flow_stats_reply.body,
@@ -515,6 +548,11 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   Reply = #ofp_flow_stats_reply{
     body = [RefactorFlowEntry(TableId, FlowEntry) || {TableId, FlowEntry} <- FlowEntries]
   },
+  % log
+  [begin
+     LogFlow = tablevisor_logformat_flowstats(Stats),
+     tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow])
+   end || Stats <- Reply#ofp_flow_stats_reply.body],
   % return
   lager:info("Reply ~p", [Reply]),
   {reply, Reply, State}.
@@ -579,6 +617,155 @@ tv_transmitter(TableId, Request) ->
   {noreply, ok} = tablevisor_ctrl4:send(TableId, Message),
   % return reply to receiver
   {ok, TableId}.
+
+
+tablevisor_log(Message, Data) ->
+  MessageF = io_lib:format(Message, Data),
+  {H, M, S} = time(),
+  {_, _, Micro} = os:timestamp(),
+  MS = erlang:round(Micro / 1000),
+  Time = io_lib:format('~2..0b:~2..0b:~2..0b.~3..0b', [H, M, S, MS]),
+  {ok, IoDevice} = file:open("rel/log/tablevisor.log", [append]),
+  io:format(IoDevice, "~s~s ~s~s~s~n", [tvlc(white), Time, tvlc(white), MessageF, tvlc(white)]),
+  file:close(IoDevice).
+
+tablevisor_log(Message) ->
+  tablevisor_log(Message, []).
+
+tvlc(Color) ->
+  tvlc(Color, 0).
+tvlc(Color, Style) ->
+  tvlc(Color, Style, black).
+tvlc(Color, Style, Background) ->
+  case Color of
+    black -> C = 90;
+    red -> C = 31;
+    green -> C = 32;
+    yellow -> C = 33;
+    blue -> C = 34;
+    purple -> C = 35;
+    cyan -> C = 36;
+    _ -> C = 37
+  end,
+  case Style of
+    b -> S = 1;
+    _ -> S = 0
+  end,
+  case Background of
+    red -> B = 41;
+    green -> B = 42;
+    yellow -> B = 43;
+    blue -> B = 44;
+    purple -> B = 45;
+    cyan -> B = 46;
+    white -> B = 47;
+    _ -> B = 0
+  end,
+  io_lib:format("~s[~sm~s[~s;~sm", [[27], io_lib:format("~p", [B]), [27], io_lib:format("~p", [S]), io_lib:format("~p", [C])]).
+
+tablevisor_logformat_flowmod(Flow) ->
+  Commons = io_lib:format("FLOW-MOD: Table ID: ~w, Priority: ~w", [Flow#ofp_flow_mod.table_id, Flow#ofp_flow_mod.priority]),
+  {_, MatchList1} = Flow#ofp_flow_mod.match,
+  MatchList2 = [tablevisor_logformat_flow_match(M) || M <- MatchList1],
+  MatchList3 = tablevisor_logformat_filteroutnils(MatchList2),
+  Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
+  InstructionList1 = Flow#ofp_flow_mod.instructions,
+  InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
+  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
+  io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
+
+tablevisor_logformat_flowstats(Flow) ->
+  Commons = io_lib:format("FLOW-STAT: Table ID: ~w, Priority: ~w", [Flow#ofp_flow_stats.table_id, Flow#ofp_flow_stats.priority]),
+  {_, MatchList1} = Flow#ofp_flow_stats.match,
+  MatchList2 = [tablevisor_logformat_flow_match(M) || M <- MatchList1],
+  MatchList3 = tablevisor_logformat_filteroutnils(MatchList2),
+  Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
+  InstructionList1 = Flow#ofp_flow_stats.instructions,
+  InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
+  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
+  io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
+
+tablevisor_logformat_flow_match(Match) ->
+  case Match of
+    #ofp_field{name = in_port, value = Value} ->
+      io_lib:format("In Port: ~p", [binary_to_int(Value)]);
+    #ofp_field{name = eth_type, value = Value} ->
+      io_lib:format("EtherType: 0x~4.16.0B", [binary_to_int(Value)]);
+    #ofp_field{name = eth_src, value = Value} ->
+      io_lib:format("Src. MAC: ~s", [binary_to_mac(Value)]);
+    #ofp_field{name = eth_dst, value = Value} ->
+      io_lib:format("Dst. MAC: ~s", [binary_to_mac(Value)]);
+    #ofp_field{name = ipv4_src, value = Value, mask = Mask} ->
+      io_lib:format("Src. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)]);
+    #ofp_field{name = ipv4_dst, value = Value, mask = Mask} ->
+      io_lib:format("Dst. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)]);
+    #ofp_field{name = mpls_label, value = Value} ->
+      io_lib:format("MPLS Label: ~s", [binary_to_mpls_label(Value)]);
+    #ofp_field{name = mpls_bos, value = Value} ->
+      io_lib:format("MPLS BOS: ~s", [binary_to_mpls_bos(Value)]);
+    _ ->
+      false
+  end.
+
+tablevisor_logformat_flow_instruction(Instruction) ->
+  FormatActions = fun(Action) ->
+    case Action of
+      #ofp_action_output{port = Port} ->
+        io_lib:format("Output: ~p", [Port]);
+      #ofp_action_pop_mpls{ethertype = EthType} ->
+        io_lib:format("POP MPLS: 0x~4.16.0B", [EthType]);
+      #ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value}} ->
+        io_lib:format("Set Src. MAC: ~s", [binary_to_mac(Value)]);
+      #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value}} ->
+        io_lib:format("Set Dst. MAC: ~s", [binary_to_mac(Value)]);
+      _ ->
+        false
+    end
+  end,
+  case Instruction of
+    #ofp_instruction_goto_table{table_id = TableId} ->
+      io_lib:format("Goto Table: ~p", [TableId]);
+    #ofp_instruction_apply_actions{actions = ActionList1} ->
+      ActionList2 = [FormatActions(A) || A <- ActionList1],
+      ActionList3 = tablevisor_logformat_filteroutnils(ActionList2),
+      case ActionList3 of
+        [] -> false;
+        _ -> ActionList3
+      end;
+    _ ->
+      false
+  end.
+
+tablevisor_logformat_filteroutnils(List) ->
+  lists:filter(fun(Element) -> Element /= false end, List).
+
+binary_to_int(Bin) ->
+  Size = size(Bin),
+  <<Int:Size/integer-unit:8>> = Bin,
+  Int.
+
+binary_to_mac(Bin) ->
+  <<A:8, B:8, C:8, D:8, E:8, F:8>> = Bin,
+  io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B", [A, B, C, D, E, F]).
+
+binary_to_ipv4(Bin) ->
+  <<A:8, B:8, C:8, D:8>> = Bin,
+  io_lib:format("~.10B.~.10B.~.10B.~.10B", [A, B, C, D]).
+
+binary_to_mpls_label(Bin) ->
+  <<A, B, C:4>> = Bin,
+  io_lib:format("~w", [(A * 2048 + B * 16 + C)]).
+
+binary_to_mpls_bos(Bin) ->
+  <<A:1>> = Bin,
+  io_lib:format("~w", [(A)]).
+
+binary_to_ipv4_prefixlength(Bin) ->
+  Int = binary_to_int(Bin),
+  String = lists:flatten(io_lib:format("~.2B", [Int])),
+  string:rchr(String, $1).
 
 %% @doc Get aggregated flow statistics.
 -spec ofp_aggregate_stats_request(state(), ofp_aggregate_stats_request()) ->
@@ -664,24 +851,28 @@ tablevisor_init_connection(TableId) ->
   % create instructions + actions
   CreateInstructions = fun(Actions) ->
     FunR = fun([], InstructionList, _) ->
-        InstructionList;
+      InstructionList;
       ([Action | Actions2], InstructionList, Fun) ->
         case Action of
           {gototable, TargetTableId} ->
             Instruction = #ofp_instruction_goto_table{table_id = TargetTableId};
           {output, OutputPort} ->
             Instruction = #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OutputPort}]};
+          {pushvlan, EtherType, VlanId, OutputPort} ->
+            Instruction = #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OutputPort}, #ofp_action_push_vlan{ethertype = EtherType}, #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<VlanId:16>>, mask = <<0:16>>}}]};
+          {setvlanid, VlanId} ->
+            Instruction = #ofp_instruction_apply_actions{actions = [#ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<VlanId:16>>}}]};
           {_, _} ->
             Instruction = false
         end,
-        Fun(Actions2, [Instruction  | InstructionList], Fun)
+        Fun(Actions2, [Instruction | InstructionList], Fun)
     end,
     FunR(Actions, [], FunR)
   end,
   % create matches
   CreateMatches = fun(Matches) ->
     FunR = fun([], MatchesList, _) ->
-        MatchesList;
+      MatchesList;
       ([Match | Matches2], MatchesList, Fun) ->
         case Match of
           {inport, InPort} ->
@@ -697,7 +888,7 @@ tablevisor_init_connection(TableId) ->
           {_, _} ->
             MatchField = false
         end,
-        Fun(Matches2, [MatchField  | MatchesList], Fun)
+        Fun(Matches2, [MatchField | MatchesList], Fun)
     end,
     FunR(Matches, [], FunR)
   end,
