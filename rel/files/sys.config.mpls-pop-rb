@@ -132,20 +132,25 @@
 
               {tablevisor_switches, [
                 {table, 0, [
-                  {dpid, 1}, % RBA
+                  {dpid, 10}, % RBA
                   {processtable, 0},
                   {outportmap, [{1, 2}]}
                 ]},
                 {table, 1, [
-                  {dpid, 2}, % RBB
+                  {dpid, 11}, % RBB
                   {processtable, 0},
                   {outportmap, [{2, 2}]}
                 ]},
                 {table, 2, [
-                  {dpid, 3},  % RBC
+                  {dpid, 12},  % RBC
                   {processtable, 0},
-                  {outportmap, []}
+                  {outportmap, [{3, 2}]}
                 ]}
+%%                 {table, 3, [
+%%                   {dpid, 13},  % RBD
+%%                   {processtable, 0},
+%%                   {outportmap, []}
+%%                 ]}
               ]}
 
             ]}
