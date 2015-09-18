@@ -145,12 +145,12 @@
                   {dpid, 12},  % RBC
                   {processtable, 0},
                   {outportmap, [{3, 2}]}
-                ]}
-%%                 {table, 3, [
-%%                   {dpid, 13},  % RBD
-%%                   {processtable, 0},
-%%                   {outportmap, []}
-%%                 ]}
+                ]},
+                 {table, 3, [
+                   {dpid, 13},  % RBD
+                   {processtable, 0},
+                   {outportmap, []}
+                 ]}
               ]}
 
             ]}
