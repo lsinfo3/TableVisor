@@ -125,7 +125,7 @@ send_features_request(Socket, Pid) ->
       DataPathId = binary_to_int(DataPathMac),
       %lager:info("DataPathId ~p", [DataPathId]),
       {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
-      lager:info("Registered new Switch DataPath-ID ~p, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
+      lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
       tablevisor_us4:tablevisor_log("~sRegistered switch with datapath id ~p for ~stable id ~p", [tablevisor_us4:tvlc(blue), DataPathId, tablevisor_us4:tvlc(blue, b), TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(TableId),
