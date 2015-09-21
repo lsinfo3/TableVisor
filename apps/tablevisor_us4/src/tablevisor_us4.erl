@@ -112,6 +112,7 @@ start(BackendOpts) ->
     {datapath_mac, DatapathMac} = lists:keyfind(datapath_mac, 1, BackendOpts),
     {config, Config} = lists:keyfind(config, 1, BackendOpts),
     tablevisor_read_config(SwitchId, Config),
+    tablevsior_preparelog(),
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
     tablevisor_log("~s--- TableVisor started ---", [tvlc(red, b)]),
@@ -618,6 +619,12 @@ tv_transmitter(TableId, Request) ->
   % return reply to receiver
   {ok, TableId}.
 
+
+tablevsior_preparelog() ->
+  filelib:ensure_dir("rel/log/"),
+  {ok, IoDevice} = file:open("rel/log/tablevisor.log", [write]),
+  %io:format(IoDevice, "", []),
+  file:close(IoDevice).
 
 tablevisor_log(Message, Data) ->
   MessageF = io_lib:format(Message, Data),
