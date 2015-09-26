@@ -305,7 +305,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % log
   LogFlow = fun(TableId, FlowMod) ->
     LogFlow2 = tablevisor_logformat_flowmod(FlowMod),
-    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId, LogFlow2])
+    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId, LogFlow2])
   end,
   [LogFlow(TableId, FlowMod3) || {TableId, FlowMod3} <- Requests],
   % send requests and receives replies
@@ -472,7 +472,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   Requests = [{TableId2, GetTableRequest(TableId2, Request)} || TableId2 <- TableIdList],
   % log
   [begin
-     tablevisor_log("~sSend ~sflow-stats-request~s to switch with table ~p: Requesting table ~p", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId11, TableId12])
+     tablevisor_log("~sSend ~sflow-stats-request~s to switch with table ~p: Requesting table ~p", [tvlc(green), tvlc(green, b), tvlc(green), TableId11, TableId12])
    end
     || {TableId11, #ofp_flow_stats_request{table_id = TableId12}} <- Requests],
   % send requests and receives replies
@@ -534,7 +534,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
      StatsBody = Reply12#ofp_flow_stats_reply.body,
      [begin
         LogFlow = tablevisor_logformat_flowstats(Stats),
-        tablevisor_log("~sReceived ~sflow-stats-reply~s from switch with table ~p: ~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId12, LogFlow])
+        tablevisor_log("~sReceived ~sflow-stats-reply~s from switch with table ~p: ~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId12, LogFlow])
       end || Stats <- StatsBody]
    end
     || {TableId12, Reply12} <- Replies],
