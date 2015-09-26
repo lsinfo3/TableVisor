@@ -118,7 +118,7 @@ start(BackendOpts) ->
     tablevisor_log("~s--- TableVisor started ---", [tvlc(red, b)]),
     tablevisor_log("~sStart controller endpoint and wait for connection establishment of the hardware switches", [tvlc(red)]),
     % wait for hardware switches
-    timer:sleep(10000),
+    tablevisor_ctrl4:tablevisor_wait_for_switches(),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     tablevisor_log("~sStart switch endpoint and connect to external controller", [tvlc(red)]),
     BufferState = linc_buffer:initialize(SwitchId),
@@ -303,11 +303,11 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
   % log
-  LogFlow = fun(TableId, FlowMod) ->
-    LogFlow2 = tablevisor_logformat_flowmod(FlowMod),
-    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId, LogFlow2])
+  LogFlow = fun(TableId3, FlowMod3) ->
+    LogFlow3 = tablevisor_logformat_flowmod(FlowMod3),
+    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId3, LogFlow3])
   end,
-  [LogFlow(TableId, FlowMod3) || {TableId, FlowMod3} <- Requests],
+  [LogFlow(TableId3, FlowMod3) || {TableId3, FlowMod3} <- Requests],
   % send requests and receives replies
   tv_request(Requests),
   {noreply, State}.

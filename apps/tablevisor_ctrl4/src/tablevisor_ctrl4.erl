@@ -25,7 +25,8 @@
   tablevisor_tables/0,
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
-  tablevisor_switch_get_gototable/2
+  tablevisor_switch_get_gototable/2,
+  tablevisor_wait_for_switches/0
 ]).
 
 
@@ -129,11 +130,11 @@ send_features_request(Socket, Pid) ->
       tablevisor_us4:tablevisor_log("~sRegistered switch with datapath id ~p for ~stable id ~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(TableId),
-true
-after 2000 ->
-lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
-false
-end .
+      true
+  after 2000 ->
+    lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
+    false
+  end.
 
 handle_input(Socket, Message) ->
   Xid = Message#ofp_message.xid,
@@ -319,6 +320,23 @@ tablevisor_switch_get_gototable(SrcTableId, OutPort) ->
       [DstTableId | _] = DstTables,
       DstTableId
   end.
+
+tablevisor_wait_for_switches() ->
+  Switches = tablevisor_tables(),
+  tablevisor_wait_for_switches(Switches).
+tablevisor_wait_for_switches([TableId | Tables]) ->
+  %lager:info("Waiting for switches ~p, currently ~p.", [[TableId | Tables], TableId]),
+  Socket = tablevisor_switch_get(TableId, socket),
+  case Socket of
+    false ->
+      timer:sleep(1000),
+      tablevisor_wait_for_switches([TableId | Tables]);
+    _ ->
+      %lager:info("Switch ~p removed from waiting queue.", [TableId]),
+      tablevisor_wait_for_switches(Tables)
+  end;
+tablevisor_wait_for_switches([]) ->
+  true.
 
 %%%-----------------------------------------------------------------------------
 %%% Sender
