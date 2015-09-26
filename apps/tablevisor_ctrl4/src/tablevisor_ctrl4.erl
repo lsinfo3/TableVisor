@@ -116,18 +116,21 @@ send_features_request(Socket, Pid) ->
   Message = features_request(),
   Xid = Message#ofp_message.xid,
   lager:info("Send features request to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+  tablevisor_us4:tablevisor_log("~sSend ~sfeatures-request~s to socket ~p", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket]),
   Pid ! {add_waiter, self()},
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
       lager:info("Received features reply from ~p, message ~p", [Socket, Reply]),
+      tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket]),
       Body = Reply#ofp_message.body,
       DataPathMac = Body#ofp_features_reply.datapath_mac,
       DataPathId = binary_to_int(DataPathMac),
+      tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p (dpid ~.16B)", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket, DataPathId]),
       %lager:info("DataPathId ~p", [DataPathId]),
       {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
-      tablevisor_us4:tablevisor_log("~sRegistered switch with datapath id ~p for ~stable id ~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), TableId]),
+      tablevisor_us4:tablevisor_log("~sRegistered switch with dpid ~.16B representing table ~s~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(TableId),
       true
