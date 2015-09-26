@@ -305,7 +305,8 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % log
   LogFlow = fun(TableId3, FlowMod3) ->
     LogFlow3 = tablevisor_logformat_flowmod(FlowMod3),
-    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId3, LogFlow3])
+    DpId3 = tablevisor_ctrl4:tablevisor_switch_get(TableId3, dpid),
+    tablevisor_log("~sSend ~sflow-mod~s to switch with dpid ~.16B representing table ~w:~s", [tvlc(green), tvlc(green, b), tvlc(green), DpId3, TableId3, LogFlow3])
   end,
   [LogFlow(TableId3, FlowMod3) || {TableId3, FlowMod3} <- Requests],
   % send requests and receives replies
@@ -692,7 +693,9 @@ tablevisor_logformat_flowstats(Flow) ->
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
   InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
-  io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
+  StatsList2 = tablevisor_logformat_flow_stats(Flow),
+  Stats = string:concat("  STATS: ", string:join(StatsList2, ", ")),
+  io_lib:format(string:join(["", Commons, Matches, Actions, Stats], "~n             "), []).
 
 tablevisor_logformat_flow_match(Match) ->
   case Match of
@@ -715,6 +718,12 @@ tablevisor_logformat_flow_match(Match) ->
     _ ->
       false
   end.
+
+tablevisor_logformat_flow_stats(Flow) ->
+  [
+    io_lib:format("Packet Count: ~w", [Flow#ofp_flow_stats.packet_count]),
+    io_lib:format("Duration (sec): ~w", [Flow#ofp_flow_stats.duration_sec])
+  ].
 
 tablevisor_logformat_flow_instruction(Instruction) ->
   FormatActions = fun(Action) ->
@@ -794,9 +803,10 @@ ofp_table_stats_request(#state{switch_id = SwitchId} = State,
 -spec ofp_table_features_request(state(), #ofp_table_features_request{}) ->
   {reply, #ofp_table_features_reply{},
     #state{}}.
-ofp_table_features_request(#state{switch_id = SwitchId} = State,
-    #ofp_table_features_request{} = Request) ->
+ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_features_request{} = Request) ->
+  tablevisor_log("~sReceived ~sfeatures-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   Reply = linc_us4_table_features:handle_req(SwitchId, Request),
+  tablevisor_log("~Send ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   {reply, Reply, State}.
 
 %% @doc Get port description.
