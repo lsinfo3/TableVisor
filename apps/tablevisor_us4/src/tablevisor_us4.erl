@@ -679,7 +679,7 @@ tablevisor_logformat_flowmod(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_mod.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  InstructionList3 = tablevisor_logformat_filteroutnils(lists:append(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
   io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
 
@@ -691,7 +691,7 @@ tablevisor_logformat_flowstats(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_stats.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  InstructionList3 = tablevisor_logformat_filteroutnils(lists:append(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
   StatsList2 = tablevisor_logformat_flow_stats(Flow),
   Stats = string:concat("  STATS: ", string:join(StatsList2, ", ")),
@@ -742,7 +742,7 @@ tablevisor_logformat_flow_instruction(Instruction) ->
   end,
   case Instruction of
     #ofp_instruction_goto_table{table_id = TableId} ->
-      io_lib:format("Goto Table: ~p", [TableId]);
+      [io_lib:format("Goto Table: ~p", [TableId])];
     #ofp_instruction_apply_actions{actions = ActionList1} ->
       ActionList2 = [FormatActions(A) || A <- ActionList1],
       ActionList3 = tablevisor_logformat_filteroutnils(ActionList2),
