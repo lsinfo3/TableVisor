@@ -533,10 +533,8 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   % log
   [begin
      StatsBody = Reply12#ofp_flow_stats_reply.body,
-     [begin
-        LogFlow = tablevisor_logformat_flowstats(Stats),
-        tablevisor_log("~sReceived ~sflow-stats-reply~s from switch with table ~p: ~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId12, LogFlow])
-      end || Stats <- StatsBody]
+     Flows = [tablevisor_logformat_flowstats(Stats) || Stats <- StatsBody],
+     tablevisor_log("~sReceived ~sflow-stats-reply~s from switch with table ~p: ~s", [tvlc(green), tvlc(green, b), tvlc(green), TableId12, Flows])
    end
     || {TableId12, Reply12} <- Replies],
   % anonymous function to separate flow entries
@@ -551,10 +549,12 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     body = [RefactorFlowEntry(TableId, FlowEntry) || {TableId, FlowEntry} <- FlowEntries]
   },
   % log
-  [begin
-     LogFlow = tablevisor_logformat_flowstats(Stats),
-     tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow])
-   end || Stats <- Reply#ofp_flow_stats_reply.body],
+  %[begin
+  %   LogFlow = tablevisor_logformat_flowstats(Stats),
+  %   tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow])
+  % end || Stats <- Reply#ofp_flow_stats_reply.body],
+  Flows12 = [tablevisor_logformat_flowstats(Stats) || Stats <- Reply#ofp_flow_stats_reply.body],
+  tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), Flows12]),
   % return
   lager:info("Reply ~p", [Reply]),
   {reply, Reply, State}.
@@ -679,7 +679,7 @@ tablevisor_logformat_flowmod(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_mod.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(lists:append(InstructionList2)),
+  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
   io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
 
@@ -691,7 +691,7 @@ tablevisor_logformat_flowstats(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_stats.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(lists:append(InstructionList2)),
+  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
   StatsList2 = tablevisor_logformat_flow_stats(Flow),
   Stats = string:concat("  STATS: ", string:join(StatsList2, ", ")),
