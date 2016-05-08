@@ -171,7 +171,17 @@ tablevisor_read_config(_SwitchId, Config) ->
   {tablevisor_switches, TVSwitches} = lists:keyfind(tablevisor_switches, 1, Switch),
   ets:new(tablevisor_switch, [public, named_table, {read_concurrency, true}]),
   [tablevisor_create_switch_config(Switch2) || Switch2 <- TVSwitches],
-  ets:new(tablevisor_socket, [public, named_table, {read_concurrency, true}]).
+  ets:new(tablevisor_socket, [public, named_table, {read_concurrency, true}]),
+  % read TableVisor config from sys.config
+  ets:new(tablevisor_config, [public, named_table, {read_concurrency, true}]),
+  {tablevisor_config, TVConfig} = lists:keyfind(tablevisor_config, 1, Switch),
+  case lists:keyfind(metadata_provider, 1, TVConfig) of
+    {metadata_provider, mac} ->
+      ets:insert(tablevisor_config, {metadata_provider, mac}),
+      lager:info("Set metadata provider: MAC-Address.");
+    false ->
+      false
+  end.
 
 tablevisor_create_switch_config(Switch) ->
   {table, TableId, SwitchConfig} = Switch,
@@ -302,11 +312,11 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
   % log
-  LogFlow = fun(TableId, FlowMod) ->
-    LogFlow2 = tablevisor_logformat_flowmod(FlowMod),
-    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId, LogFlow2])
+  LogFlow = fun(TableId4, FlowMod4) ->
+    LogFlow2 = tablevisor_logformat_flowmod(FlowMod4),
+    tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId4, LogFlow2])
   end,
-  [LogFlow(TableId, FlowMod3) || {TableId, FlowMod3} <- Requests],
+  [LogFlow(TableId5, FlowMod3) || {TableId5, FlowMod3} <- Requests],
   % send requests and receives replies
   tv_request(Requests),
   {noreply, State}.
@@ -734,6 +744,8 @@ tablevisor_logformat_flow_instruction(Instruction) ->
         [] -> false;
         _ -> ActionList3
       end;
+    #ofp_instruction_write_metadata{metadata = Metadata, metadata_mask = MetadataMask} ->
+      io_lib:format("Write Metadata: ~s/~s", [binary_to_metadata(Metadata), binary_to_metadata(MetadataMask)]);
     _ ->
       false
   end.
@@ -749,6 +761,10 @@ binary_to_int(Bin) ->
 binary_to_mac(Bin) ->
   <<A:8, B:8, C:8, D:8, E:8, F:8>> = Bin,
   io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B", [A, B, C, D, E, F]).
+
+binary_to_metadata(Bin) ->
+  <<A:8, B:8, C:8, D:8, E:8, F:8, G:8, H:8>> = Bin,
+  io_lib:format("~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B:~2.16.0B", [A, B, C, D, E, F, G, H]).
 
 binary_to_ipv4(Bin) ->
   <<A:8, B:8, C:8, D:8>> = Bin,
