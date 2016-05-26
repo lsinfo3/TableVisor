@@ -308,18 +308,111 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
-  end,
+                    end,
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
+  % build requests by applying matadata to mac matching
+  MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
+  case MetadataProvider of
+    mac ->
+      Requests2 = [apply_metadata2mac_provider(Request) || Request <- Requests];
+    _ ->
+      Requests2 = Requests
+  end,
   % log
   LogFlow = fun(TableId4, FlowMod4) ->
     LogFlow2 = tablevisor_logformat_flowmod(FlowMod4),
     tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId4, LogFlow2])
-  end,
-  [LogFlow(TableId5, FlowMod3) || {TableId5, FlowMod3} <- Requests],
+            end,
+  [LogFlow(TableId5, FlowMod3) || {TableId5, FlowMod3} <- Requests2],
   % send requests and receives replies
-  tv_request(Requests),
+  tv_request(Requests2),
   {noreply, State}.
+
+apply_metadata2mac_provider({TableId3, FlowMod1}) ->
+  TargetInstruction = filter_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions),
+  case TargetInstruction == [] of
+    true ->
+      % there are no write metadata -> return original untouched flow mod
+      FlowMod4 = FlowMod1;
+    false ->
+      % remove write metadata instructions
+      FlowMod2 = FlowMod1#ofp_flow_mod{
+        instructions = remove_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions)
+      },
+      % remove set eth dst field
+      FlowMod3 = FlowMod2#ofp_flow_mod{
+        instructions = remove_flowmod_action_set_ethdst(FlowMod2#ofp_flow_mod.instructions)
+      },
+      MetadataInstruction = hd(TargetInstruction),
+      % set set eth dst field from metadata
+      FlowMod4 = FlowMod3#ofp_flow_mod{
+        instructions = add_flowmod_action_set_ethdst_from_metadata(FlowMod3#ofp_flow_mod.instructions, MetadataInstruction#ofp_instruction_write_metadata.metadata)
+      }
+  end,
+  {TableId3, FlowMod4}.
+
+% remove flowmod write metadata instruction
+-spec remove_flowmod_instruction_metadata([ofp_instruction()])
+      -> {[ofp_instruction()]}.
+remove_flowmod_instruction_metadata(InstructionList) ->
+  [I || I <- InstructionList, not(is_record(I, ofp_instruction_write_metadata))].
+
+% filter flowmod write metadata instruction
+-spec filter_flowmod_instruction_metadata([ofp_instruction()])
+      -> {[ofp_instruction()]}.
+filter_flowmod_instruction_metadata(InstructionList) ->
+  [I || I <- InstructionList, is_record(I, ofp_instruction_write_metadata)].
+
+% remove flowmod set dst mac address action
+-spec remove_flowmod_action_set_ethdst([ofp_instruction()])
+      -> {[ofp_instruction()]}.
+remove_flowmod_action_set_ethdst(InstructionList) ->
+  ApplyInstruction = safehd([I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)]),
+  case ApplyInstruction == nil of
+    true ->
+      InstructionList;
+    false ->
+      SetFieldActionList = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_set_field)],
+      case SetFieldActionList == [] of
+        true ->
+          InstructionList;
+        false ->
+          SetFieldActionList2 = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions,
+            not(is_record(A, ofp_action_set_field)) orelse
+              (is_record(A, ofp_action_set_field) and is_record(A#ofp_action_set_field.field, ofp_field) and (A#ofp_action_set_field.field#ofp_field.name /= eth_dst))],
+          InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [#ofp_instruction_apply_actions{actions = SetFieldActionList2}],
+          InstructionList2
+      end
+  end.
+
+% add flowmod set dst mac address action from metadata
+-spec add_flowmod_action_set_ethdst_from_metadata([ofp_instruction()], term())
+      -> {[ofp_instruction()]}.
+add_flowmod_action_set_ethdst_from_metadata(InstructionList, Metadata) ->
+  <<_:16, CuttedMetadata/binary>> = Metadata,
+  lager:info("InstructionList ~p", [InstructionList]),
+  NewSetEthDstAction = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = CuttedMetadata}},
+  ApplyInstructionList = [I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)],
+  lager:info("ApplyInstructionList ~p", [ApplyInstructionList]),
+  case ApplyInstructionList == [] of
+    true ->
+      ApplyInstruction = #ofp_instruction_apply_actions{actions = []};
+    false ->
+      [ApplyInstruction | _] = ApplyInstructionList
+  end,
+  InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [ApplyInstruction#ofp_instruction_apply_actions{actions = ApplyInstruction#ofp_instruction_apply_actions.actions ++ [NewSetEthDstAction]}],
+  InstructionList2.
+
+-spec safehd([any()])
+      -> [any()].
+safehd(List) ->
+  case List == [] of
+    true ->
+      nil;
+    false ->
+      hd(List)
+  end.
 
 %% @doc Modify flow table configuration.
 -spec ofp_table_mod(state(), ofp_table_mod()) ->
@@ -469,14 +562,14 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
       _ ->
         [TableId]
     end
-  end,
+                   end,
   % get table id list
   TableIdList = GetTableIdList(Request#ofp_flow_stats_request.table_id),
   % anonymous function to generate indivudal table request
   GetTableRequest = fun(TableId, Request2) ->
     DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
     Request2#ofp_flow_stats_request{table_id = DevTableId}
-  end,
+                    end,
   % build requests
   Requests = [{TableId2, GetTableRequest(TableId2, Request)} || TableId2 <- TableIdList],
   % log
@@ -537,7 +630,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
     % insert instructions into flow entry and replace tableid
     FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
-  end,
+                      end,
   % log
   [begin
      StatsBody = Reply12#ofp_flow_stats_reply.body,
@@ -551,7 +644,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   SeparateFlowEntries = fun(TableId, Reply) ->
     Body = Reply#ofp_flow_stats_reply.body,
     [{TableId, FlowStat} || FlowStat <- Body]
-  end,
+                        end,
   % rebuild reply
   FlowEntriesDeep = [SeparateFlowEntries(TableId, Reply) || {TableId, Reply} <- Replies],
   FlowEntries = lists:flatten(FlowEntriesDeep),
@@ -571,7 +664,7 @@ tv_request(Requests) ->
 % start transmitter
   [spawn(fun() ->
     tv_transmitter(TableId, Request)
-  end) || {TableId, Request} <- Requests].
+         end) || {TableId, Request} <- Requests].
 
 tv_request(Requests, Timeout) ->
   % define caller
@@ -579,11 +672,11 @@ tv_request(Requests, Timeout) ->
   % define receiver processes
   ReceiverPid = spawn_link(fun() ->
     tablevisor_receiver(length(Requests), Timeout, Caller, [])
-  end),
+                           end),
   % start transmitter
   [spawn(fun() ->
     tv_transmitter(TableId, Request, Timeout, ReceiverPid)
-  end) || {TableId, Request} <- Requests],
+         end) || {TableId, Request} <- Requests],
   % wait for response
   receive
     Any ->
@@ -733,7 +826,7 @@ tablevisor_logformat_flow_instruction(Instruction) ->
       _ ->
         false
     end
-  end,
+                  end,
   case Instruction of
     #ofp_instruction_goto_table{table_id = TableId} ->
       io_lib:format("Goto Table: ~p", [TableId]);
@@ -882,9 +975,9 @@ tablevisor_init_connection(TableId) ->
             Instruction = false
         end,
         Fun(Actions2, [Instruction | InstructionList], Fun)
-    end,
+           end,
     FunR(Actions, [], FunR)
-  end,
+                       end,
   % create matches
   CreateMatches = fun(Matches) ->
     FunR = fun([], MatchesList, _) ->
@@ -905,9 +998,9 @@ tablevisor_init_connection(TableId) ->
             MatchField = false
         end,
         Fun(Matches2, [MatchField | MatchesList], Fun)
-    end,
+           end,
     FunR(Matches, [], FunR)
-  end,
+                  end,
   % create flow entry
   CreateFlowMod = fun(FlowModConfig) ->
     % read and set values
@@ -944,13 +1037,13 @@ tablevisor_init_connection(TableId) ->
       instructions = InstructionList
     },
     FlowMod
-  end,
+                  end,
   % send flow mod
   SendFlowMod = fun(FlowModConfig) ->
     FlowMod = CreateFlowMod(FlowModConfig),
     Message = tablevisor_ctrl4:message(FlowMod),
     tablevisor_ctrl4:send(TableId, Message)
-  end,
+                end,
   [SendFlowMod(FlowModConfig) || FlowModConfig <- FlowMods].
 
 %% tablevisor_flow_add_backline(TableId) ->
@@ -998,7 +1091,7 @@ ttpsim_request(RequestedTable, Request) ->
   % start sender process
   spawn(fun() ->
     ttpsim_transmit(RequestedTableList, Request)
-  end),
+        end),
   ok.
 
 ttpsim_transmit([], _Request) ->
@@ -1008,7 +1101,7 @@ ttpsim_transmit([TableId | RequestedTable], Request) ->
     %lager:info("send to ~p with message ~p", [TableId, Request]),
     Message = tablevisor_ctrl4:message(Request),
     {noreply, ok} = tablevisor_ctrl4:send(TableId, Message)
-  end),
+        end),
   ttpsim_transmit(RequestedTable, Request).
 
 
