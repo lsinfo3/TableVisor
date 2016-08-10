@@ -163,7 +163,21 @@ handle_input(Socket, Message) ->
         false ->
           false;
         TableId ->
-          tablevisor_us4:ofp_packet_in(TableId, Message)
+          Pkt = pkt2:decapsulate(Message#ofp_message.body#ofp_packet_in.data),
+          L3Pdu = lists:nth(2, Pkt),
+          case L3Pdu of
+            #lldp{} ->
+              lager:warning("LLPD packet in ~p", [Message]),
+%%              Pdus = L3Pdu#lldp.pdus,
+%%              lager:info("LPDUs ~p", [Pdus]),
+%%              ChassisId = lists:keyfind(Pdus, 1, chassis_id),
+              [InPort | _] = [binary_to_int(F#ofp_field.value) || F <- Message#ofp_message.body#ofp_packet_in.match#ofp_match.fields, is_record(F, ofp_field) andalso F#ofp_field.name =:= in_port],
+              [SrcSwitchId | _] = [binary_to_int(F#chassis_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, chassis_id)],
+              [OutPort | _] = [binary_to_int(F#port_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, port_id)],
+              lager:info("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [TableId, InPort, SrcSwitchId, OutPort]);
+            _ ->
+              tablevisor_us4:ofp_packet_in(TableId, Message)
+          end
       end;
     #ofp_message{} ->
       lager:info("Received message from ~p: ~p", [Socket, Message])
@@ -334,6 +348,21 @@ tablevisor_topology_discovery() ->
 tablevisor_topology_discovery([TableId | Tables]) ->
   % Get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
+  % generate Flow mod to push all LLDP packets to controller
+  FlowMod = message(#ofp_flow_mod{
+    table_id = 0,
+    command = add,
+    hard_timeout = 600,
+    idle_timeout = 600,
+    priority = 255,
+    flags = [],
+    match = #ofp_match{fields = [#ofp_field{name = eth_type, value = <<16#88cc:16>>}]},
+    instructions = [#ofp_instruction_apply_actions{actions = [#ofp_action_output{port = controller}]}]
+  }),
+  lager:warning("FlowMod: ~p", [FlowMod]),
+  % send packet to switch
+  do_send(Socket, FlowMod),
+
   % generate LLDP packet
   EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
   LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
