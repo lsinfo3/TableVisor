@@ -12,6 +12,7 @@
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("pkt/include/pkt.hrl").
+-include_lib("pkt2/include/pkt_lldp.hrl").
 
 -compile([{parse_transform, lager_transform}]).
 
@@ -38,14 +39,14 @@ start(Port) ->
     Opts = [binary, {packet, raw}, {active, once}, {reuseaddr, true}],
     {ok, LSocket} = gen_tcp:listen(Port, Opts),
     accept(LSocket)
-  end).
+             end).
 
 accept(LSocket) ->
   {ok, Socket} = gen_tcp:accept(LSocket),
   Pid = spawn_link(fun() ->
     inet:setopts(Socket, [{active, once}]),
     handle_socket(Socket, [], <<>>)
-  end),
+                   end),
   Pid ! {new},
   ok = gen_tcp:controlling_process(Socket, Pid),
   accept(LSocket).
@@ -84,8 +85,8 @@ handle_socket(Socket, Waiters, Data1) ->
         spawn_link(fun() ->
           send_to_waiters(Socket, Message, Xid, FilteredWaiters),
           handle_input(Socket, Message)
-        end)
-      end, Messages),
+                   end)
+                    end, Messages),
       handle_socket(Socket, FilteredWaiters, <<>>);
   % close tcp socket by client (rb)
     {tcp_closed, Socket} ->
@@ -97,7 +98,7 @@ handle_socket(Socket, Waiters, Data1) ->
       ListenerPid = self(),
       spawn_link(fun() ->
         send_features_request(Socket, ListenerPid)
-      end),
+                 end),
       handle_socket(Socket, Waiters, <<>>);
     {add_waiter, Waiter} ->
       NewWaiters = [Waiter | Waiters],
@@ -129,11 +130,11 @@ send_features_request(Socket, Pid) ->
       tablevisor_us4:tablevisor_log("~sRegistered switch with datapath id ~p for ~stable id ~p", [tablevisor_us4:tvlc(blue), DataPathId, tablevisor_us4:tvlc(blue, b), TableId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(TableId),
-true
-after 2000 ->
-lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
-false
-end .
+      true
+  after 2000 ->
+    lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
+    false
+  end.
 
 handle_input(Socket, Message) ->
   Xid = Message#ofp_message.xid,
@@ -161,8 +162,8 @@ handle_input(Socket, Message) ->
       end;
     #ofp_message{} ->
       lager:info("Received message from ~p: ~p", [Socket, Message])
-  %_ ->
-  %  lager:error("Unknown message: ~p", [Message])
+    %_ ->
+    %  lager:error("Unknown message: ~p", [Message])
   end.
 
 send_to_waiters(_Socket, _Message, _Xid, []) ->
@@ -226,7 +227,7 @@ tablevisor_switch_connect(DataPathId, Socket, Pid) ->
       _ ->
         false
     end
-  end,
+                 end,
   [SearchByDpId(TableId, Config) || {TableId, Config} <- SwitchList],
   TableId2 = tablevisor_switch_get(Socket, tableid),
   {ok, TableId2}.
@@ -280,7 +281,7 @@ tablevisor_switch_set(TableId, Key, NewValue) ->
         _ ->
           {OldKey, OldValue}
       end
-    end,
+                    end,
     Config = ets:lookup_element(tablevisor_switch, TableId, 2),
     NewConfig = [ReplaceConfig(Key2, Value2) || {Key2, Value2} <- Config],
     ets:insert(tablevisor_switch, {TableId, NewConfig})
