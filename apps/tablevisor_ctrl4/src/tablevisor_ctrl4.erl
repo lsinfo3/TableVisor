@@ -27,7 +27,8 @@
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
-  tablevisor_wait_for_switches/0
+  tablevisor_wait_for_switches/0,
+  tablevisor_topology_discovery/0
 ]).
 
 
@@ -236,25 +237,6 @@ tablevisor_switch_connect(DataPathId, Socket, Pid) ->
   TableId2 = tablevisor_switch_get(Socket, tableid),
   {ok, TableId2}.
 
-%ttpsim_switch_get(TableId) when is_integer(TableId) ->
-%  try
-%    ets:lookup_element(ttpsim_switch, TableId, 2)
-%  catch
-%    error:badarg ->
-%      lager:error("No Switch with TableId ~p registered", [TableId]),
-%      false
-%  end;
-%ttpsim_switch_get(Socket) ->
-%  try
-%    TableId = ets:lookup_element(ttpsim_socket, Socket, 2),
-%    ttpsim_switch_get(TableId)
-%  catch
-%    error:badarg ->
-%      lager:error("No Switch with Socket ~p registered", [Socket]),
-%      false
-%  end.
-
-
 tablevisor_switch_get(TableId, Key) when is_integer(TableId) ->
   try
     Config = ets:lookup_element(tablevisor_switch, TableId, 2),
@@ -340,6 +322,35 @@ tablevisor_wait_for_switches([TableId | Tables]) ->
       tablevisor_wait_for_switches(Tables)
   end;
 tablevisor_wait_for_switches([]) ->
+  true.
+
+%%%-----------------------------------------------------------------------------
+%%% TableVisor Topology Discovery via LLDP
+%%%-----------------------------------------------------------------------------
+
+tablevisor_topology_discovery() ->
+  Switches = tablevisor_tables(),
+  tablevisor_topology_discovery(Switches).
+tablevisor_topology_discovery([TableId | Tables]) ->
+  % Get socket for current table (switch)
+  Socket = tablevisor_switch_get(TableId, socket),
+  % generate LLDP packet
+  EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
+  LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
+    #chassis_id{value = <<TableId>>},
+    #port_id{value = <<1>>},
+    #ttl{value = 5}
+  ]}),
+  All = <<EtherPktBin/binary, LldpPktBin/binary>>,
+%%  lager:warning("Sum: ~p", [All]),
+%%  lager:warning("EtherPaket: ~p", [EtherPktBin]),
+  % generate packet out packet
+  OFPktOut = message(#ofp_packet_out{buffer_id = no_buffer, actions = [#ofp_action_output{port = 1}], data = All}),
+  lager:warning("PacketOut: ~p", [OFPktOut]),
+  % send packet to switch
+  do_send(Socket, OFPktOut),
+  tablevisor_topology_discovery(Tables);
+tablevisor_topology_discovery([]) ->
   true.
 
 %%%-----------------------------------------------------------------------------

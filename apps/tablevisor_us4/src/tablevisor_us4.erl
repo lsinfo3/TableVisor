@@ -119,6 +119,7 @@ start(BackendOpts) ->
     tablevisor_log("~sStart controller endpoint and wait for connection establishment of the hardware switches", [tvlc(red)]),
     % wait for hardware switches
     tablevisor_ctrl4:tablevisor_wait_for_switches(),
+    tablevisor_ctrl4:tablevisor_topology_discovery(),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     tablevisor_log("~sStart switch endpoint and connect to external controller", [tvlc(red)]),
     BufferState = linc_buffer:initialize(SwitchId),
