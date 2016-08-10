@@ -112,12 +112,13 @@ start(BackendOpts) ->
     {datapath_mac, DatapathMac} = lists:keyfind(datapath_mac, 1, BackendOpts),
     {config, Config} = lists:keyfind(config, 1, BackendOpts),
     tablevisor_read_config(SwitchId, Config),
+    tablevsior_preparelog(),
     {ok} = init_controller(6633),
     lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
     tablevisor_log("~s--- TableVisor started ---", [tvlc(red, b)]),
     tablevisor_log("~sStart controller endpoint and wait for connection establishment of the hardware switches", [tvlc(red)]),
     % wait for hardware switches
-    timer:sleep(10000),
+    tablevisor_ctrl4:tablevisor_wait_for_switches(),
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     tablevisor_log("~sStart switch endpoint and connect to external controller", [tvlc(red)]),
     BufferState = linc_buffer:initialize(SwitchId),
@@ -308,7 +309,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
-                    end,
+  end,
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
   % build requests by applying matadata to mac matching
@@ -574,7 +575,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   Requests = [{TableId2, GetTableRequest(TableId2, Request)} || TableId2 <- TableIdList],
   % log
   [begin
-     tablevisor_log("~sSend ~sflow-stats-request~s to switch with table ~p: Requesting table ~p", [tvlc(blue), tvlc(blue, b), tvlc(blue), TableId11, TableId12])
+     tablevisor_log("~sSend ~sflow-stats-request~s to switch with table ~p: Requesting table ~p", [tvlc(green), tvlc(green, b), tvlc(green), TableId11, TableId12])
    end
     || {TableId11, #ofp_flow_stats_request{table_id = TableId12}} <- Requests],
   % send requests and receives replies
@@ -630,7 +631,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
     % insert instructions into flow entry and replace tableid
     FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
-                      end,
+  end,
   % log
   [begin
      StatsBody = Reply12#ofp_flow_stats_reply.body,
@@ -644,7 +645,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   SeparateFlowEntries = fun(TableId, Reply) ->
     Body = Reply#ofp_flow_stats_reply.body,
     [{TableId, FlowStat} || FlowStat <- Body]
-                        end,
+  end,
   % rebuild reply
   FlowEntriesDeep = [SeparateFlowEntries(TableId, Reply) || {TableId, Reply} <- Replies],
   FlowEntries = lists:flatten(FlowEntriesDeep),
@@ -652,10 +653,12 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     body = [RefactorFlowEntry(TableId, FlowEntry) || {TableId, FlowEntry} <- FlowEntries]
   },
   % log
-  [begin
-     LogFlow = tablevisor_logformat_flowstats(Stats),
-     tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow])
-   end || Stats <- Reply#ofp_flow_stats_reply.body],
+  %[begin
+  %   LogFlow = tablevisor_logformat_flowstats(Stats),
+  %   tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow])
+  % end || Stats <- Reply#ofp_flow_stats_reply.body],
+  Flows12 = [tablevisor_logformat_flowstats(Stats) || Stats <- Reply#ofp_flow_stats_reply.body],
+  tablevisor_log("~sSend ~sflow-stats-reply~s to controller: ~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), Flows12]),
   % return
   lager:info("Reply ~p", [Reply]),
   {reply, Reply, State}.
@@ -722,6 +725,12 @@ tv_transmitter(TableId, Request) ->
   {ok, TableId}.
 
 
+tablevsior_preparelog() ->
+  filelib:ensure_dir("rel/log/"),
+  {ok, IoDevice} = file:open("rel/log/tablevisor.log", [write]),
+  %io:format(IoDevice, "", []),
+  file:close(IoDevice).
+
 tablevisor_log(Message, Data) ->
   MessageF = io_lib:format(Message, Data),
   {H, M, S} = time(),
@@ -774,7 +783,7 @@ tablevisor_logformat_flowmod(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_mod.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
   io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
 
@@ -786,9 +795,11 @@ tablevisor_logformat_flowstats(Flow) ->
   Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
   InstructionList1 = Flow#ofp_flow_stats.instructions,
   InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = tablevisor_logformat_filteroutnils(InstructionList2),
+  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
   Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
-  io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
+  StatsList2 = tablevisor_logformat_flow_stats(Flow),
+  Stats = string:concat("  STATS: ", string:join(StatsList2, ", ")),
+  io_lib:format(string:join(["", Commons, Matches, Actions, Stats], "~n             "), []).
 
 tablevisor_logformat_flow_match(Match) ->
   case Match of
@@ -811,6 +822,12 @@ tablevisor_logformat_flow_match(Match) ->
     _ ->
       false
   end.
+
+tablevisor_logformat_flow_stats(Flow) ->
+  [
+    io_lib:format("Packet Count: ~w", [Flow#ofp_flow_stats.packet_count]),
+    io_lib:format("Duration (sec): ~w", [Flow#ofp_flow_stats.duration_sec])
+  ].
 
 tablevisor_logformat_flow_instruction(Instruction) ->
   FormatActions = fun(Action) ->
@@ -896,9 +913,10 @@ ofp_table_stats_request(#state{switch_id = SwitchId} = State,
 -spec ofp_table_features_request(state(), #ofp_table_features_request{}) ->
   {reply, #ofp_table_features_reply{},
     #state{}}.
-ofp_table_features_request(#state{switch_id = SwitchId} = State,
-    #ofp_table_features_request{} = Request) ->
+ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_features_request{} = Request) ->
+  tablevisor_log("~sReceived ~sfeatures-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   Reply = linc_us4_table_features:handle_req(SwitchId, Request),
+  tablevisor_log("~Send ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   {reply, Reply, State}.
 
 %% @doc Get port description.
@@ -975,9 +993,9 @@ tablevisor_init_connection(TableId) ->
             Instruction = false
         end,
         Fun(Actions2, [Instruction | InstructionList], Fun)
-           end,
+    end,
     FunR(Actions, [], FunR)
-                       end,
+  end,
   % create matches
   CreateMatches = fun(Matches) ->
     FunR = fun([], MatchesList, _) ->
@@ -998,9 +1016,9 @@ tablevisor_init_connection(TableId) ->
             MatchField = false
         end,
         Fun(Matches2, [MatchField | MatchesList], Fun)
-           end,
+    end,
     FunR(Matches, [], FunR)
-                  end,
+  end,
   % create flow entry
   CreateFlowMod = fun(FlowModConfig) ->
     % read and set values
@@ -1037,13 +1055,13 @@ tablevisor_init_connection(TableId) ->
       instructions = InstructionList
     },
     FlowMod
-                  end,
+  end,
   % send flow mod
   SendFlowMod = fun(FlowModConfig) ->
     FlowMod = CreateFlowMod(FlowModConfig),
     Message = tablevisor_ctrl4:message(FlowMod),
     tablevisor_ctrl4:send(TableId, Message)
-                end,
+  end,
   [SendFlowMod(FlowModConfig) || FlowModConfig <- FlowMods].
 
 %% tablevisor_flow_add_backline(TableId) ->
@@ -1091,7 +1109,7 @@ ttpsim_request(RequestedTable, Request) ->
   % start sender process
   spawn(fun() ->
     ttpsim_transmit(RequestedTableList, Request)
-        end),
+  end),
   ok.
 
 ttpsim_transmit([], _Request) ->
@@ -1101,7 +1119,7 @@ ttpsim_transmit([TableId | RequestedTable], Request) ->
     %lager:info("send to ~p with message ~p", [TableId, Request]),
     Message = tablevisor_ctrl4:message(Request),
     {noreply, ok} = tablevisor_ctrl4:send(TableId, Message)
-        end),
+  end),
   ttpsim_transmit(RequestedTable, Request).
 
 
