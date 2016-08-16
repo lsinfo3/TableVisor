@@ -68,7 +68,8 @@
   tablevisor_log/2,
   tvlc/1,
   tvlc/2,
-  tvlc/3
+  tvlc/3,
+  tv_request/2
 ]).
 
 %% Handle messages from switches to controller
@@ -310,7 +311,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
-  end,
+                    end,
   % build requests
   Requests = [{TableId3, RefactorFlowMod(TableId3, FlowMod)} || TableId3 <- TableIdList],
   % build requests by applying matadata to mac matching
@@ -557,14 +558,15 @@ ofp_desc_request(State, #ofp_desc_request{}) ->
 ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_request{table_id = TableId10} = Request) ->
   tablevisor_log("~sReceived ~sflow-stats-request~s from controller: Requesting table ~p", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), TableId10]),
   % anonymous function for getting table id list
-  GetTableIdList = fun(TableId) ->
-    case TableId of
-      all ->
-        tablevisor_ctrl4:tablevisor_tables();
-      _ ->
-        [TableId]
-    end
-                   end,
+  GetTableIdList =
+    fun(TableId) ->
+      case TableId of
+        all ->
+          tablevisor_ctrl4:tablevisor_tables();
+        _ ->
+          [TableId]
+      end
+    end,
   % get table id list
   TableIdList = GetTableIdList(Request#ofp_flow_stats_request.table_id),
   % anonymous function to generate indivudal table request
@@ -632,7 +634,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
     % insert instructions into flow entry and replace tableid
     FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
-  end,
+                      end,
   % log
   [begin
      StatsBody = Reply12#ofp_flow_stats_reply.body,
@@ -646,7 +648,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   SeparateFlowEntries = fun(TableId, Reply) ->
     Body = Reply#ofp_flow_stats_reply.body,
     [{TableId, FlowStat} || FlowStat <- Body]
-  end,
+                        end,
   % rebuild reply
   FlowEntriesDeep = [SeparateFlowEntries(TableId, Reply) || {TableId, Reply} <- Replies],
   FlowEntries = lists:flatten(FlowEntriesDeep),
@@ -994,9 +996,9 @@ tablevisor_init_connection(TableId) ->
             Instruction = false
         end,
         Fun(Actions2, [Instruction | InstructionList], Fun)
-    end,
+           end,
     FunR(Actions, [], FunR)
-  end,
+                       end,
   % create matches
   CreateMatches = fun(Matches) ->
     FunR = fun([], MatchesList, _) ->
@@ -1017,9 +1019,9 @@ tablevisor_init_connection(TableId) ->
             MatchField = false
         end,
         Fun(Matches2, [MatchField | MatchesList], Fun)
-    end,
+           end,
     FunR(Matches, [], FunR)
-  end,
+                  end,
   % create flow entry
   CreateFlowMod = fun(FlowModConfig) ->
     % read and set values
@@ -1056,13 +1058,13 @@ tablevisor_init_connection(TableId) ->
       instructions = InstructionList
     },
     FlowMod
-  end,
+                  end,
   % send flow mod
   SendFlowMod = fun(FlowModConfig) ->
     FlowMod = CreateFlowMod(FlowModConfig),
     Message = tablevisor_ctrl4:message(FlowMod),
     tablevisor_ctrl4:send(TableId, Message)
-  end,
+                end,
   [SendFlowMod(FlowModConfig) || FlowModConfig <- FlowMods].
 
 %% tablevisor_flow_add_backline(TableId) ->
@@ -1110,7 +1112,7 @@ ttpsim_request(RequestedTable, Request) ->
   % start sender process
   spawn(fun() ->
     ttpsim_transmit(RequestedTableList, Request)
-  end),
+        end),
   ok.
 
 ttpsim_transmit([], _Request) ->
@@ -1120,7 +1122,7 @@ ttpsim_transmit([TableId | RequestedTable], Request) ->
     %lager:info("send to ~p with message ~p", [TableId, Request]),
     Message = tablevisor_ctrl4:message(Request),
     {noreply, ok} = tablevisor_ctrl4:send(TableId, Message)
-  end),
+        end),
   ttpsim_transmit(RequestedTable, Request).
 
 

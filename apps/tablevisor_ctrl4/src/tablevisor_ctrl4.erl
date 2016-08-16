@@ -344,16 +344,19 @@ tablevisor_wait_for_switches([]) ->
 
 tablevisor_topology_discovery() ->
   Switches = tablevisor_tables(),
-  tablevisor_topology_discovery(Switches).
-tablevisor_topology_discovery([TableId | Tables]) ->
-  % Get socket for current table (switch)
+  tablevisor_toplogy_discovery_flowmod(Switches),
+  tablevisor_topology_discovery_lldp(Switches).
+
+tablevisor_toplogy_discovery_flowmod([TableId | Tables]) ->
+  FlowModTimeout = 600,
+  % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
   % generate Flow mod to push all LLDP packets to controller
   FlowMod = message(#ofp_flow_mod{
     table_id = 0,
     command = add,
-    hard_timeout = 600,
-    idle_timeout = 600,
+    hard_timeout = FlowModTimeout,
+    idle_timeout = FlowModTimeout,
     priority = 255,
     flags = [],
     match = #ofp_match{fields = [#ofp_field{name = eth_type, value = <<16#88cc:16>>}]},
@@ -362,24 +365,48 @@ tablevisor_topology_discovery([TableId | Tables]) ->
   lager:warning("FlowMod: ~p", [FlowMod]),
   % send packet to switch
   do_send(Socket, FlowMod),
+  tablevisor_toplogy_discovery_flowmod(Tables);
+tablevisor_toplogy_discovery_flowmod([]) ->
+  true.
 
-  % generate LLDP packet
-  EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
-  LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
-    #chassis_id{value = <<TableId>>},
-    #port_id{value = <<1>>},
-    #ttl{value = 5}
-  ]}),
-  All = <<EtherPktBin/binary, LldpPktBin/binary>>,
-%%  lager:warning("Sum: ~p", [All]),
-%%  lager:warning("EtherPaket: ~p", [EtherPktBin]),
-  % generate packet out packet
-  OFPktOut = message(#ofp_packet_out{buffer_id = no_buffer, actions = [#ofp_action_output{port = 1}], data = All}),
-  lager:warning("PacketOut: ~p", [OFPktOut]),
-  % send packet to switch
-  do_send(Socket, OFPktOut),
-  tablevisor_topology_discovery(Tables);
-tablevisor_topology_discovery([]) ->
+tablevisor_topology_discovery_lldp([TableId | Tables]) ->
+  % get socket for current table (switch)
+  Socket = tablevisor_switch_get(TableId, socket),
+  % build request for single switch
+  Request = message(#ofp_port_stats_request{port_no = any}),
+  % send request and receive reply
+  {reply, Reply} = send(TableId, Request, 2000),
+  lager:warning("Reply ~p", [Reply]),
+  % anonymous function for sending LLDP packets
+  LLDPSender = fun(OutputPortNo) ->
+    lager:warning("Port ~p", [OutputPortNo]),
+    % build ethernet header for LLDP packet
+    EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
+    % build LLDP packet
+    LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
+      #chassis_id{value = <<TableId>>},
+      #port_id{value = <<OutputPortNo>>},
+      #ttl{value = 5}
+    ]}),
+    % build OpenFlow packet out message with LLDP packet
+    OFPktOut = message(#ofp_packet_out{buffer_id = no_buffer, actions = [#ofp_action_output{port = OutputPortNo}], data = <<EtherPktBin/binary, LldpPktBin/binary>>}),
+    lager:warning("PacketOut: ~p", [OFPktOut]),
+    % send OpenFlow packet out message to switch
+    do_send(Socket, OFPktOut)
+               end,
+  % iterate through each port
+  [
+    if
+      is_integer(PortStats#ofp_port_stats.port_no) ->
+        LLDPSender(PortStats#ofp_port_stats.port_no);
+      true ->
+        true
+    end
+    || PortStats <- Reply#ofp_port_stats_reply.body
+  ],
+  % continue with topology discovery with other tables
+  tablevisor_topology_discovery_lldp(Tables);
+tablevisor_topology_discovery_lldp([]) ->
   true.
 
 %%%-----------------------------------------------------------------------------
@@ -401,35 +428,17 @@ send(Socket, Message, Timeout) ->
   Pid = tablevisor_switch_get(Socket, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
-  %lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+%%  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
       ReplyBody = Reply#ofp_message.body,
+%%      lager:info("Received from ~p, xid ~p, message ~p", [Socket, Xid, Reply]),
       {reply, ReplyBody}
   after Timeout ->
     lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
     {error, timeout}
   end.
-
-%multisend(TableId, Message, Timeout) when is_integer(TableId) ->
-%  Socket = tablevisor_switch_get(TableId, socket),
-%  multisend(Socket, Message, Timeout);
-%multisend(Socket, Message, Timeout) ->
-%  Pid = tablevisor_switch_get(Socket, pid),
-%  Pid ! {add_waiter, self()},
-%  Xid = Message#ofp_message.xid,
-%  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
-%  do_send(Socket, Message),
-%  receive
-%    {msg, Reply, Xid} ->
-%      ReplyBody = Reply#ofp_message.body,
-%      %lager:info("Reply ~p", [ReplyBody]),
-%      {reply, ReplyBody}
-%  after Timeout ->
-%    lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
-%    {error, timeout}
-%  end.
 
 do_send(Socket, Message) when is_tuple(Message) ->
   case of_protocol:encode(Message) of
