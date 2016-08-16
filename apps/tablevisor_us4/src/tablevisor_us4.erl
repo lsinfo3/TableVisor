@@ -68,8 +68,7 @@
   tablevisor_log/2,
   tvlc/1,
   tvlc/2,
-  tvlc/3,
-  tv_request/2
+  tvlc/3
 ]).
 
 %% Handle messages from switches to controller

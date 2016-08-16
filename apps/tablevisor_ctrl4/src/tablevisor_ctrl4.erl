@@ -35,20 +35,20 @@
 %% @doc Start the server.
 start(Port) ->
   lager:start(),
-  %ets:new(ttpsim_dpid2tableid, [public, named_table, {read_concurrency, true}]),
-  %ets:insert(ttpsim_dpid2tableid, {2, 0}),
-  spawn_link(fun() ->
-    Opts = [binary, {packet, raw}, {active, once}, {reuseaddr, true}],
-    {ok, LSocket} = gen_tcp:listen(Port, Opts),
-    accept(LSocket)
-             end).
+  spawn_link(
+    fun() ->
+      Opts = [binary, {packet, raw}, {active, once}, {reuseaddr, true}],
+      {ok, LSocket} = gen_tcp:listen(Port, Opts),
+      accept(LSocket)
+    end).
 
 accept(LSocket) ->
   {ok, Socket} = gen_tcp:accept(LSocket),
-  Pid = spawn_link(fun() ->
-    inet:setopts(Socket, [{active, once}]),
-    handle_socket(Socket, [], <<>>)
-                   end),
+  Pid = spawn_link(
+    fun() ->
+      inet:setopts(Socket, [{active, once}]),
+      handle_socket(Socket, [], <<>>)
+    end),
   Pid ! {new},
   ok = gen_tcp:controlling_process(Socket, Pid),
   accept(LSocket).
@@ -65,7 +65,7 @@ handle_socket(Socket, Waiters, Data1) ->
         N when N > byte_size(Data2) ->
           handle_socket(Socket, Waiters, Data2);
         N when N < byte_size(Data2) ->
-          lager:error("multiple OpenFlow messages in one TCP bytestream");
+          lager:error("Multiple OpenFlow messages in one TCP bytestream");
         _ ->
           true
       end,
@@ -80,15 +80,17 @@ handle_socket(Socket, Waiters, Data1) ->
           handle_socket(Socket, Waiters, <<>>)
       end,
       {ok, _NewParser, Messages} = Parsed,
-      lager:debug("Received messages ~p", [Messages]),
+      lager:debug("Received messages from socket ~p", [Messages]),
       FilteredWaiters = filter_waiters(Waiters),
-      lists:foreach(fun(Message) ->
-        Xid = Message#ofp_message.xid,
-        spawn_link(fun() ->
-          send_to_waiters(Socket, Message, Xid, FilteredWaiters),
-          handle_input(Socket, Message)
-                   end)
-                    end, Messages),
+      lists:foreach(
+        fun(Message) ->
+          Xid = Message#ofp_message.xid,
+          spawn_link(
+            fun() ->
+              send_to_waiters(Socket, Message, Xid, FilteredWaiters),
+              handle_input(Socket, Message)
+            end)
+        end, Messages),
       handle_socket(Socket, FilteredWaiters, <<>>);
   % close tcp socket by client (rb)
     {tcp_closed, Socket} ->
@@ -98,13 +100,13 @@ handle_socket(Socket, Waiters, Data1) ->
     {new} ->
       do_send(Socket, hello()),
       ListenerPid = self(),
-      spawn_link(fun() ->
-        send_features_request(Socket, ListenerPid)
-                 end),
+      spawn_link(
+        fun() ->
+          send_features_request(Socket, ListenerPid)
+        end),
       handle_socket(Socket, Waiters, <<>>);
     {add_waiter, Waiter} ->
-      NewWaiters = [Waiter | Waiters],
-      handle_socket(Socket, NewWaiters, <<>>);
+      handle_socket(Socket, [Waiter | Waiters], <<>>);
     Other ->
       lager:error("Received unknown signal ~p", [Other]),
       handle_socket(Socket, Waiters, <<>>)
@@ -155,29 +157,17 @@ handle_input(Socket, Message) ->
       do_send(Socket, message(echo_reply(), Xid));
     #ofp_message{body = #ofp_hello{}} ->
       lager:info("Received hello message from ~p: ~p", [Socket, Message]);
+    #ofp_message{body = #ofp_port_stats_reply{}} ->
+      lager:debug("Received port stats reply from ~p: ~p", [Socket, Message]);
     #ofp_message{body = #ofp_features_reply{datapath_mac = _DataPathMac}} ->
       lager:debug("Received features reply message from ~p: ~p", [Socket, Message]);
     #ofp_message{body = #ofp_packet_in{}} ->
-      lager:info("Received packet in from ~p: ~p", [Socket, Message]),
+      lager:debug("Received packet in from ~p: ~p", [Socket, Message]),
       case tablevisor_switch_get(Socket, tableid) of
         false ->
           false;
         TableId ->
-          Pkt = pkt2:decapsulate(Message#ofp_message.body#ofp_packet_in.data),
-          L3Pdu = lists:nth(2, Pkt),
-          case L3Pdu of
-            #lldp{} ->
-              lager:warning("LLPD packet in ~p", [Message]),
-%%              Pdus = L3Pdu#lldp.pdus,
-%%              lager:info("LPDUs ~p", [Pdus]),
-%%              ChassisId = lists:keyfind(Pdus, 1, chassis_id),
-              [InPort | _] = [binary_to_int(F#ofp_field.value) || F <- Message#ofp_message.body#ofp_packet_in.match#ofp_match.fields, is_record(F, ofp_field) andalso F#ofp_field.name =:= in_port],
-              [SrcSwitchId | _] = [binary_to_int(F#chassis_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, chassis_id)],
-              [OutPort | _] = [binary_to_int(F#port_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, port_id)],
-              lager:info("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [TableId, InPort, SrcSwitchId, OutPort]);
-            _ ->
-              tablevisor_us4:ofp_packet_in(TableId, Message)
-          end
+          tablevisor_us4:ofp_packet_in(TableId, Message)
       end;
     #ofp_message{} ->
       lager:info("Received message from ~p: ~p", [Socket, Message])
@@ -188,9 +178,9 @@ handle_input(Socket, Message) ->
 send_to_waiters(_Socket, _Message, _Xid, []) ->
   true;
 send_to_waiters(Socket, Message, Xid, [Waiter | Waiters]) ->
-  %lager:info("Send to waiter ~p, xid ~p, message ~p", [Waiter, Xid, Message]),
+  lager:debug("Send to waiter ~p, xid ~p, message ~p", [Waiter, Xid, Message]),
   Waiter ! {msg, Message, Xid},
-  send_to_waiters(Socket, Xid, Message, Waiters).
+  send_to_waiters(Socket, Message, Xid, Waiters).
 
 
 %%%-----------------------------------------------------------------------------
@@ -230,23 +220,21 @@ binary_to_int(Bin) ->
 
 tablevisor_switch_remove(_Socket) ->
   true.
-%{TableId, _, _} = ttpsim_switch_get(Socket),
-%ets:delete(ttpsim_socket, Socket),
-%ets:delete(ttpsim_switch, TableId).
 
 tablevisor_switch_connect(DataPathId, Socket, Pid) ->
   SwitchList = tablevisor_switches(),
-  SearchByDpId = fun(TableId, Config) ->
-    {dpid, DpId} = lists:keyfind(dpid, 1, Config),
-    case DpId of
-      DataPathId ->
-        tablevisor_switch_set(TableId, socket, Socket),
-        tablevisor_switch_set(TableId, pid, Pid),
-        ets:insert(tablevisor_socket, {Socket, TableId});
-      _ ->
-        false
-    end
-                 end,
+  SearchByDpId =
+    fun(TableId, Config) ->
+      {dpid, DpId} = lists:keyfind(dpid, 1, Config),
+      case DpId of
+        DataPathId ->
+          tablevisor_switch_set(TableId, socket, Socket),
+          tablevisor_switch_set(TableId, pid, Pid),
+          ets:insert(tablevisor_socket, {Socket, TableId});
+        _ ->
+          false
+      end
+    end,
   [SearchByDpId(TableId, Config) || {TableId, Config} <- SwitchList],
   TableId2 = tablevisor_switch_get(Socket, tableid),
   {ok, TableId2}.
@@ -274,14 +262,15 @@ tablevisor_switch_get(Socket, Key) ->
 
 tablevisor_switch_set(TableId, Key, NewValue) ->
   try
-    ReplaceConfig = fun(OldKey, OldValue) ->
-      case OldKey of
-        Key ->
-          {OldKey, NewValue};
-        _ ->
-          {OldKey, OldValue}
-      end
-                    end,
+    ReplaceConfig =
+      fun(OldKey, OldValue) ->
+        case OldKey of
+          Key ->
+            {OldKey, NewValue};
+          _ ->
+            {OldKey, OldValue}
+        end
+      end,
     Config = ets:lookup_element(tablevisor_switch, TableId, 2),
     NewConfig = [ReplaceConfig(Key2, Value2) || {Key2, Value2} <- Config],
     ets:insert(tablevisor_switch, {TableId, NewConfig})
@@ -343,31 +332,78 @@ tablevisor_wait_for_switches([]) ->
 %%%-----------------------------------------------------------------------------
 
 tablevisor_topology_discovery() ->
+  Timeout = 2, % Timeout in seconds
   Switches = tablevisor_tables(),
-  tablevisor_toplogy_discovery_flowmod(Switches),
-  tablevisor_topology_discovery_lldp(Switches).
+  tablevisor_toplogy_discovery_flowmod(Switches, Timeout),
+  ReceiverPidList = tablevisor_topology_discovery_listener(Switches),
+  tablevisor_topology_discovery_lldp(Switches),
+  timer:sleep(Timeout * 1000),
+  ConnectionList = tablevisor_topology_discovery_fetcher(ReceiverPidList),
+  lager:debug("Discovered connections: ~p", [ConnectionList]),
+  Graph = tablevisor_toplogy_discovery_build_digraph(ConnectionList),
+  Graph.
 
-tablevisor_toplogy_discovery_flowmod([TableId | Tables]) ->
-  FlowModTimeout = 600,
+tablevisor_toplogy_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
   % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
   % generate Flow mod to push all LLDP packets to controller
   FlowMod = message(#ofp_flow_mod{
     table_id = 0,
     command = add,
-    hard_timeout = FlowModTimeout,
-    idle_timeout = FlowModTimeout,
+    hard_timeout = FlowModTimeout + 1,
+    idle_timeout = FlowModTimeout + 1,
     priority = 255,
     flags = [],
     match = #ofp_match{fields = [#ofp_field{name = eth_type, value = <<16#88cc:16>>}]},
     instructions = [#ofp_instruction_apply_actions{actions = [#ofp_action_output{port = controller}]}]
   }),
-  lager:warning("FlowMod: ~p", [FlowMod]),
   % send packet to switch
   do_send(Socket, FlowMod),
-  tablevisor_toplogy_discovery_flowmod(Tables);
-tablevisor_toplogy_discovery_flowmod([]) ->
+  % continue with topology discovery flowmods with other tables
+  tablevisor_toplogy_discovery_flowmod(Tables, FlowModTimeout);
+tablevisor_toplogy_discovery_flowmod([], _FlowModTimeout) ->
   true.
+
+tablevisor_topology_discovery_listener(Tables) ->
+  tablevisor_topology_discovery_listener(Tables, []).
+tablevisor_topology_discovery_listener([TableId | Tables], ReceiverPidList) ->
+  ReceiverPid = spawn(
+    fun() ->
+      Socket = tablevisor_switch_get(TableId, socket),
+      Pid = tablevisor_switch_get(Socket, pid),
+      Pid ! {add_waiter, self()},
+      tablevisor_topology_discovery_receiver(TableId)
+    end),
+  % continue with topology discovery listeners with other tables
+  tablevisor_topology_discovery_listener(Tables, ReceiverPidList ++ [ReceiverPid]);
+tablevisor_topology_discovery_listener([], ReceiverPidList) ->
+  ReceiverPidList.
+
+tablevisor_topology_discovery_receiver(TableId) ->
+  tablevisor_topology_discovery_receiver(TableId, []).
+tablevisor_topology_discovery_receiver(TableId, ConnectionList) ->
+  receive
+    {msg, Reply, _Xid} ->
+      case Reply of
+        #ofp_message{body = #ofp_packet_in{}} ->
+          Pkt = pkt2:decapsulate(Reply#ofp_message.body#ofp_packet_in.data),
+          L3Pdu = lists:nth(2, Pkt),
+          case L3Pdu of
+            #lldp{} ->
+              [IngressPort | _] = [binary_to_int(F#ofp_field.value) || F <- Reply#ofp_message.body#ofp_packet_in.match#ofp_match.fields, is_record(F, ofp_field) andalso F#ofp_field.name =:= in_port],
+              [SrcSwitchId | _] = [binary_to_int(F#chassis_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, chassis_id)],
+              [EgressPort | _] = [binary_to_int(F#port_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, port_id)],
+              lager:debug("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [TableId, IngressPort, SrcSwitchId, EgressPort]),
+              tablevisor_topology_discovery_receiver(TableId, ConnectionList ++ [{{SrcSwitchId, EgressPort}, {TableId, IngressPort}}]);
+            _ ->
+              tablevisor_topology_discovery_receiver(TableId, ConnectionList)
+          end;
+        _ ->
+          tablevisor_topology_discovery_receiver(TableId, ConnectionList)
+      end;
+    {get_replies, ServerPid} ->
+      ServerPid ! {connections, ConnectionList}
+  end.
 
 tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   % get socket for current table (switch)
@@ -376,24 +412,22 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   Request = message(#ofp_port_stats_request{port_no = any}),
   % send request and receive reply
   {reply, Reply} = send(TableId, Request, 2000),
-  lager:warning("Reply ~p", [Reply]),
   % anonymous function for sending LLDP packets
-  LLDPSender = fun(OutputPortNo) ->
-    lager:warning("Port ~p", [OutputPortNo]),
-    % build ethernet header for LLDP packet
-    EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
-    % build LLDP packet
-    LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
-      #chassis_id{value = <<TableId>>},
-      #port_id{value = <<OutputPortNo>>},
-      #ttl{value = 5}
-    ]}),
-    % build OpenFlow packet out message with LLDP packet
-    OFPktOut = message(#ofp_packet_out{buffer_id = no_buffer, actions = [#ofp_action_output{port = OutputPortNo}], data = <<EtherPktBin/binary, LldpPktBin/binary>>}),
-    lager:warning("PacketOut: ~p", [OFPktOut]),
-    % send OpenFlow packet out message to switch
-    do_send(Socket, OFPktOut)
-               end,
+  LLDPSender =
+    fun(OutputPortNo) ->
+      % build ethernet header for LLDP packet
+      EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
+      % build LLDP packet
+      LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
+        #chassis_id{value = <<TableId>>},
+        #port_id{value = <<OutputPortNo>>},
+        #ttl{value = 5}
+      ]}),
+      % build OpenFlow packet out message with LLDP packet
+      OFPktOut = message(#ofp_packet_out{buffer_id = no_buffer, actions = [#ofp_action_output{port = OutputPortNo}], data = <<EtherPktBin/binary, LldpPktBin/binary>>}),
+      % send OpenFlow packet out message to switch
+      do_send(Socket, OFPktOut)
+    end,
   % iterate through each port
   [
     if
@@ -408,6 +442,38 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   tablevisor_topology_discovery_lldp(Tables);
 tablevisor_topology_discovery_lldp([]) ->
   true.
+
+tablevisor_topology_discovery_fetcher(ReceiverPidList) ->
+  tablevisor_topology_discovery_fetcher(ReceiverPidList, []).
+tablevisor_topology_discovery_fetcher([ReceiverPid | ReceiverPidList], ConnectionList) ->
+  ReceiverPid ! {get_replies, self()},
+  receive
+    {connections, NewConnections} ->
+      true
+  after 10000 ->
+    NewConnections = []
+  end,
+  tablevisor_topology_discovery_fetcher(ReceiverPidList, ConnectionList ++ NewConnections);
+tablevisor_topology_discovery_fetcher([], ConnectionList) ->
+  ConnectionList.
+
+tablevisor_toplogy_discovery_build_digraph(ConnectionList) ->
+  G = digraph:new(),
+  tablevisor_toplogy_discovery_build_digraph(G, ConnectionList).
+tablevisor_toplogy_discovery_build_digraph(G, [Connection | ConnectionList]) ->
+  {{V1, P1}, {V2, P2}} = Connection,
+  digraph:add_vertex(G, V1),
+  digraph:add_vertex(G, V2),
+  digraph:add_edge(G, V1, V2, {P1, P2}),
+  tablevisor_toplogy_discovery_build_digraph(G, ConnectionList);
+tablevisor_toplogy_discovery_build_digraph(G, []) ->
+  VList = digraph:vertices(G),
+  lager:debug("Vertices: ~p", [VList]),
+  [
+    lager:debug("Connections from ~p to ~p", [V, digraph:out_neighbours(G, V)])
+    || V <- VList
+  ],
+  G.
 
 %%%-----------------------------------------------------------------------------
 %%% Sender
@@ -428,12 +494,12 @@ send(Socket, Message, Timeout) ->
   Pid = tablevisor_switch_get(Socket, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
-%%  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+  lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
       ReplyBody = Reply#ofp_message.body,
-%%      lager:info("Received from ~p, xid ~p, message ~p", [Socket, Xid, Reply]),
+      lager:debug("Received from ~p, xid ~p, message ~p", [Socket, Xid, Reply]),
       {reply, ReplyBody}
   after Timeout ->
     lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
@@ -449,14 +515,6 @@ do_send(Socket, Message) when is_tuple(Message) ->
   end;
 do_send(Socket, Message) when is_binary(Message) ->
   gen_tcp:send(Socket, Message).
-%inet:setopts(Socket, [{active, once}]).
-%try
-%  inet:setopts(Socket, [{active, once}]),
-%  gen_tcp:send(Socket, Message)
-%catch
-%  _:_ ->
-%    ok
-%end.
 
 
 %%%-----------------------------------------------------------------------------
@@ -469,165 +527,9 @@ hello() ->
 features_request() ->
   message(#ofp_features_request{}).
 
-%echo_request() ->
-%  echo_request(<<>>).
-%echo_request(Data) ->
-%  message(#ofp_echo_request{data = Data}).
-
 echo_reply() ->
   echo_reply(<<>>).
 echo_reply(Data) ->
   #ofp_echo_reply{data = Data}.
 
-%get_config_request() ->
-%  message(#ofp_get_config_request{}).
-%
-%barrier_request() ->
-%  message(#ofp_barrier_request{}).
-%
-%queue_get_config_request() ->
-%  message(#ofp_queue_get_config_request{port = any}).
-%
-%desc_request() ->
-%  message(#ofp_desc_request{}).
-%
-%flow_stats_request() ->
-%  message(#ofp_flow_stats_request{table_id = all}).
-%
-%flow_stats_request_with_cookie(Cookie) ->
-%  message(#ofp_flow_stats_request{table_id = all,
-%    cookie = Cookie,
-%    cookie_mask = <<-1:64>>}).
-%
-%aggregate_stats_request() ->
-%  message(#ofp_aggregate_stats_request{table_id = all}).
-%
-%table_stats_request() ->
-%  message(#ofp_table_stats_request{}).
-%
-%port_stats_request() ->
-%  message(#ofp_port_stats_request{port_no = any}).
-%
-%queue_stats_request() ->
-%  message(#ofp_queue_stats_request{port_no = any, queue_id = all}).
-%
-%group_stats_request() ->
-%  message(#ofp_group_stats_request{group_id = all}).
-%
-%group_desc_request() ->
-%  message(#ofp_group_desc_request{}).
-%
-%group_features_request() ->
-%  message(#ofp_group_features_request{}).
-%
-%remove_all_flows() ->
-%  message(#ofp_flow_mod{command = delete}).
-%
-%set_config() ->
-%  message(#ofp_set_config{miss_send_len = no_buffer}).
-%
-%group_mod() ->
-%  message(#ofp_group_mod{
-%    command  = add,
-%    type = all,
-%    group_id = 1,
-%    buckets = [#ofp_bucket{
-%      weight = 1,
-%      watch_port = 1,
-%      watch_group = 1,
-%      actions = [#ofp_action_output{port = 2}]}]}).
-%
-%port_mod() ->
-%  message(#ofp_port_mod{port_no = 1,
-%    hw_addr = <<0,17,0,0,17,17>>,
-%    config = [],
-%    mask = [],
-%    advertise = [fiber]}).
-%
-%group_mod_add_bucket_with_output_to_controller(GroupId) ->
-%  message(#ofp_group_mod{
-%    command  = add,
-%    type = all,
-%    group_id = GroupId,
-%    buckets = [#ofp_bucket{
-%      actions = [#ofp_action_output{port = controller}]}]
-%  }).
-%
-%group_mod_modify_bucket(GroupId) ->
-%  message(#ofp_group_mod{
-%    command  = modify,
-%    type = all,
-%    group_id = GroupId,
-%    buckets = [#ofp_bucket{
-%      actions = [#ofp_action_output{port = 2}]}]
-%  }).
-%
-%delete_all_groups() ->
-%  message(#ofp_group_mod{
-%    command = delete,
-%    type = all,
-%    group_id = 16#fffffffc
-%  }).
-%
-%port_desc_request() ->
-%  message(#ofp_port_desc_request{}).
-%
-%oe_port_desc_request() ->
-%  message(#ofp_experimenter_request{
-%    experimenter = ?INFOBLOX_EXPERIMENTER,
-%    exp_type = port_desc,
-%    data = <<>>}).
-%
-%role_request() ->
-%  message(#ofp_role_request{role = nochange, generation_id = 1}).
-%
-%flow_mod_table_miss() ->
-%  Action = #ofp_action_output{port = controller},
-%  Instruction = #ofp_instruction_apply_actions{actions = [Action]},
-%  message(#ofp_flow_mod{table_id = 0,
-%    command = add,
-%    priority = 0,
-%    instructions = [Instruction]}).
-%
-%flow_mod_delete_all_flows() ->
-%  message(#ofp_flow_mod{table_id = all,
-%    command = delete}).
-%
-%%% Flow mod to test behaviour reported in:
-%%% https://github.com/FlowForwarding/LINC-Switch/issues/68
-%flow_mod_issue68() ->
-%  %% Match fields
-%  MatchField1 = #ofp_field{class = openflow_basic,
-%    has_mask = false,
-%    name = eth_type,
-%    value = <<2048:16>>},
-%  MatchField2 = #ofp_field{class = openflow_basic,
-%    has_mask = false,
-%    name = ipv4_src,
-%    value = <<192:8,168:8,0:8,68:8>>},
-%  Match = #ofp_match{fields = [MatchField1, MatchField2]},
-%  %% Instructions
-%  SetField = #ofp_field{class = openflow_basic,
-%    has_mask = false,
-%    name = ipv4_dst,
-%    value = <<10:8,0:8,0:8,68:8>>},
-%  Action1 = #ofp_action_set_field{field = SetField},
-%  Action2 = #ofp_action_output{port = 2, max_len = no_buffer},
-%  Instruction = #ofp_instruction_apply_actions{actions = [Action1, Action2]},
-%  %% Flow Mod
-%  message(#ofp_flow_mod{
-%    cookie = <<0:64>>,
-%    cookie_mask = <<0:64>>,
-%    table_id = 0,
-%    command = add,
-%    idle_timeout = 0,
-%    hard_timeout = 0,
-%    priority = 1,
-%    buffer_id = no_buffer,
-%    out_port = any,
-%    out_group = any,
-%    flags = [],
-%    match = Match,
-%    instructions = [Instruction]
-%  }).
 
