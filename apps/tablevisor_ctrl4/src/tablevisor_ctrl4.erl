@@ -276,7 +276,7 @@ tablevisor_switch_set(TableId, Key, NewValue) ->
     ets:insert(tablevisor_switch, {TableId, NewConfig})
   catch
     error:badarg ->
-      lager:error("Error in ttpsim_switch_set", [TableId]),
+      lager:error("Error in tablevisor_switch_set", [TableId]),
       false
   end.
 
@@ -333,17 +333,19 @@ tablevisor_wait_for_switches([]) ->
 
 tablevisor_topology_discovery() ->
   Timeout = 2, % Timeout in seconds
-  Switches = tablevisor_tables(),
-  tablevisor_toplogy_discovery_flowmod(Switches, Timeout),
-  ReceiverPidList = tablevisor_topology_discovery_listener(Switches),
-  tablevisor_topology_discovery_lldp(Switches),
+  tablevisor_topology_discovery_flowmod(Timeout),
+  ReceiverPidList = tablevisor_topology_discovery_listener(),
+  tablevisor_topology_discovery_lldp(),
   timer:sleep(Timeout * 1000),
   ConnectionList = tablevisor_topology_discovery_fetcher(ReceiverPidList),
   lager:debug("Discovered connections: ~p", [ConnectionList]),
-  Graph = tablevisor_toplogy_discovery_build_digraph(ConnectionList),
-  Graph.
+  Graph = tablevisor_topology_discovery_build_digraph(ConnectionList),
+  tablevisor_topology_discovery_apply(Graph).
 
-tablevisor_toplogy_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
+tablevisor_topology_discovery_flowmod(FlowModTimeout) ->
+  Tables = tablevisor_tables(),
+  tablevisor_topology_discovery_flowmod(Tables, FlowModTimeout).
+tablevisor_topology_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
   % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
   % generate Flow mod to push all LLDP packets to controller
@@ -360,11 +362,12 @@ tablevisor_toplogy_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
   % send packet to switch
   do_send(Socket, FlowMod),
   % continue with topology discovery flowmods with other tables
-  tablevisor_toplogy_discovery_flowmod(Tables, FlowModTimeout);
-tablevisor_toplogy_discovery_flowmod([], _FlowModTimeout) ->
+  tablevisor_topology_discovery_flowmod(Tables, FlowModTimeout);
+tablevisor_topology_discovery_flowmod([], _FlowModTimeout) ->
   true.
 
-tablevisor_topology_discovery_listener(Tables) ->
+tablevisor_topology_discovery_listener() ->
+  Tables = tablevisor_tables(),
   tablevisor_topology_discovery_listener(Tables, []).
 tablevisor_topology_discovery_listener([TableId | Tables], ReceiverPidList) ->
   ReceiverPid = spawn(
@@ -405,6 +408,9 @@ tablevisor_topology_discovery_receiver(TableId, ConnectionList) ->
       ServerPid ! {connections, ConnectionList}
   end.
 
+tablevisor_topology_discovery_lldp() ->
+  Tables = tablevisor_tables(),
+  tablevisor_topology_discovery_lldp(Tables).
 tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
@@ -457,16 +463,16 @@ tablevisor_topology_discovery_fetcher([ReceiverPid | ReceiverPidList], Connectio
 tablevisor_topology_discovery_fetcher([], ConnectionList) ->
   ConnectionList.
 
-tablevisor_toplogy_discovery_build_digraph(ConnectionList) ->
+tablevisor_topology_discovery_build_digraph(ConnectionList) ->
   G = digraph:new(),
-  tablevisor_toplogy_discovery_build_digraph(G, ConnectionList).
-tablevisor_toplogy_discovery_build_digraph(G, [Connection | ConnectionList]) ->
+  tablevisor_topology_discovery_build_digraph(G, ConnectionList).
+tablevisor_topology_discovery_build_digraph(G, [Connection | ConnectionList]) ->
   {{V1, P1}, {V2, P2}} = Connection,
   digraph:add_vertex(G, V1),
   digraph:add_vertex(G, V2),
   digraph:add_edge(G, V1, V2, {P1, P2}),
-  tablevisor_toplogy_discovery_build_digraph(G, ConnectionList);
-tablevisor_toplogy_discovery_build_digraph(G, []) ->
+  tablevisor_topology_discovery_build_digraph(G, ConnectionList);
+tablevisor_topology_discovery_build_digraph(G, []) ->
   VList = digraph:vertices(G),
   lager:debug("Vertices: ~p", [VList]),
   [
@@ -474,6 +480,43 @@ tablevisor_toplogy_discovery_build_digraph(G, []) ->
     || V <- VList
   ],
   G.
+
+tablevisor_topology_discovery_apply(Graph) ->
+  Tables = lists:sort(tablevisor_tables()),
+  List1 = lists:sublist(Tables, 1, length(Tables) - 1),
+  List2 = lists:sublist(Tables, 2, length(Tables)),
+  RequiredConnections = lists:zip(List1, List2),
+  tablevisor_topology_discovery_connection_from_graph(Graph, RequiredConnections).
+
+tablevisor_topology_discovery_connection_from_graph(Graph, [{SrcTableId, DstTableId} | RequiredConnections]) ->
+  Edge = tablevisor_digraph_get_edge(Graph, SrcTableId, DstTableId),
+  case Edge of
+    {_E, V1, V2, {P1, P2}} ->
+      lager:info("Connection from Switch ~p Port ~p to Switch ~p Port ~p discovered.", [V1, P1, V2, P2]),
+      OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
+      OutportMap2 = OutportMap ++ [{V2, P1}],
+      tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);
+    false ->
+      lager:error("No Connection from Switch ~p to Switch ~p found!", [SrcTableId, DstTableId])
+  end,
+  tablevisor_topology_discovery_connection_from_graph(Graph, RequiredConnections);
+tablevisor_topology_discovery_connection_from_graph(_Graph, []) ->
+  true.
+
+tablevisor_digraph_get_edge(Graph, V1, V2) ->
+  OutEdges = digraph:out_edges(Graph, V1),
+  tablevisor_digraph_get_edge(Graph, V1, V2, OutEdges).
+tablevisor_digraph_get_edge(Graph, V1, V2, [Edge | EdgeList]) ->
+  E = digraph:edge(Graph, Edge),
+  case E of
+    {_E, V1, V2, _Label} ->
+      E;
+    false ->
+      tablevisor_digraph_get_edge(Graph, V1, V2, EdgeList)
+  end;
+tablevisor_digraph_get_edge(_Graph, _V1, _V2, []) ->
+  false.
+
 
 %%%-----------------------------------------------------------------------------
 %%% Sender

@@ -114,7 +114,7 @@ start(BackendOpts) ->
     tablevisor_read_config(SwitchId, Config),
     tablevsior_preparelog(),
     {ok} = init_controller(6633),
-    lager:info("Switch initialization: We wait several seconds for ttpsim-switch initialization."),
+    lager:info("Waiting for Connections from TableVisor Hardware Switches"),
     tablevisor_log("~s--- TableVisor started ---", [tvlc(red, b)]),
     tablevisor_log("~sStart controller endpoint and wait for connection establishment of the hardware switches", [tvlc(red)]),
     % wait for hardware switches
@@ -189,9 +189,8 @@ tablevisor_create_switch_config(Switch) ->
   {table, TableId, SwitchConfig} = Switch,
   {dpid, DpId} = lists:keyfind(dpid, 1, SwitchConfig),
   {processtable, ProcessTable} = lists:keyfind(processtable, 1, SwitchConfig),
-  % {egresstable, EgressTable} = lists:keyfind(egresstable, 1, SwitchConfig),
-  {outportmap, OutportMap} = lists:keyfind(outportmap, 1, SwitchConfig),
-  % read back line mapping for connections from last table to switch 0
+  OutportMap = tablevisor_config_read_outportmap(SwitchConfig),
+% read back line mapping for connections from last table to switch 0
   case lists:keyfind(flowmods, 1, SwitchConfig) of
     {flowmods, FlowMods} ->
       true;
@@ -206,11 +205,18 @@ tablevisor_create_switch_config(Switch) ->
     {socket, false},
     {pid, false},
     {processtable, ProcessTable},
-    % {egresstable, EgressTable},
     {flowmods, FlowMods}
   ],
   ets:insert(tablevisor_switch, {TableId, Config}).
 
+tablevisor_config_read_outportmap(SwitchConfig) ->
+  ListEntry = lists:keyfind(outportmap, 1, SwitchConfig),
+  case ListEntry of
+    {outportmap, OutportMap} ->
+      OutportMap;
+    _ ->
+      []
+  end.
 
 %%%-----------------------------------------------------------------------------
 %%% Backend API
