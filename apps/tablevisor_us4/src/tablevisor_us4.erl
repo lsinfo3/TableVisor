@@ -275,7 +275,7 @@ ofp_features_request(#state{switch_id = SwitchId,
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
   LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
   tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
-  %lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
+  lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
   TableIdList = [TableId],
   % anonymous function to generate flow mod
@@ -582,10 +582,11 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   % get table id list
   TableIdList = GetTableIdList(Request#ofp_flow_stats_request.table_id),
   % anonymous function to generate indivudal table request
-  GetTableRequest = fun(TableId, Request2) ->
-    DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
-    Request2#ofp_flow_stats_request{table_id = DevTableId}
-                    end,
+  GetTableRequest =
+    fun(TableId, Request2) ->
+      DevTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+      Request2#ofp_flow_stats_request{table_id = DevTableId}
+    end,
   % build requests
   Requests = [{TableId2, GetTableRequest(TableId2, Request)} || TableId2 <- TableIdList],
   % log
@@ -596,57 +597,58 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   % send requests and receives replies
   Replies = tv_request(Requests, 2000),
   % anonymous function to refactor flow entries
-  RefactorFlowEntry = fun(TableId, FlowEntry) ->
-    % extract apply-action-instructions from all instructions
-    ApplyActionInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, is_record(I, ofp_instruction_apply_actions)],
-    case ApplyActionInstructionList == [] of
-      true ->
-        % there are no apply-action-instructions -> leave untouched
-        FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-      false ->
-        % get first (and only available) apply-action-instruction
-        [ApplyActionInstruction | _] = ApplyActionInstructionList,
-        % extract output-actions from apply-actions
-        OutputActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_output)],
-        case OutputActionList == [] of
-          true ->
-            % there are no output-actions -> leave untouched
-            FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-          false ->
-            % extract first (and only available) outupt-action
-            [OutputAction | _] = OutputActionList,
-            % read port
-            OutPort = OutputAction#ofp_action_output.port,
-            % check if the output-port is a goto-table-connection
-            OutputTableId = tablevisor_ctrl4:tablevisor_switch_get_gototable(TableId, OutPort),
-            case OutputTableId of
-              false ->
-                % no mapping from output-port to destination table -> leave untouched
-                FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-              _ ->
-                % the inspected output-action is a goto-table-connection
-                % create goto-table instruction
-                GotoTableInstruction = #ofp_instruction_goto_table{table_id = OutputTableId},
-                % filter all apply-actions from instructions
-                FilteredInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, not(is_record(I, ofp_instruction_apply_actions))],
-                % filter all output-actions form apply-actions
-                FilteredApplyActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, not(is_record(A, ofp_action_output))],
-                % set new filtered apply-actions to apply-action-instruction without ouput-action
-                FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = FilteredApplyActionList},
-                % lager:info("Filtered Instructions: ~p", [FilteredInstructionList]),
-                % lager:info("Final ApplyAction Instructions: ~p", [FinalApplyActionInstruction]),
-                % lager:info("GotoTableInstruction: ~p", [GotoTableInstruction]),
-                % create final instruction by filtered instructions without apply-actions-instruction
-                %    + filtered apply-action-instruction without output-action
-                %    + generated goto-table instruction
-                FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction] ++ [GotoTableInstruction]
-            end
-        end
+  RefactorFlowEntry =
+    fun(TableId, FlowEntry) ->
+      % extract apply-action-instructions from all instructions
+      ApplyActionInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, is_record(I, ofp_instruction_apply_actions)],
+      case ApplyActionInstructionList == [] of
+        true ->
+          % there are no apply-action-instructions -> leave untouched
+          FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
+        false ->
+          % get first (and only available) apply-action-instruction
+          [ApplyActionInstruction | _] = ApplyActionInstructionList,
+          % extract output-actions from apply-actions
+          OutputActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_output)],
+          case OutputActionList == [] of
+            true ->
+              % there are no output-actions -> leave untouched
+              FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
+            false ->
+              % extract first (and only available) outupt-action
+              [OutputAction | _] = OutputActionList,
+              % read port
+              OutPort = OutputAction#ofp_action_output.port,
+              % check if the output-port is a goto-table-connection
+              OutputTableId = tablevisor_ctrl4:tablevisor_switch_get_gototable(TableId, OutPort),
+              case OutputTableId of
+                false ->
+                  % no mapping from output-port to destination table -> leave untouched
+                  FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
+                _ ->
+                  % the inspected output-action is a goto-table-connection
+                  % create goto-table instruction
+                  GotoTableInstruction = #ofp_instruction_goto_table{table_id = OutputTableId},
+                  % filter all apply-actions from instructions
+                  FilteredInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, not(is_record(I, ofp_instruction_apply_actions))],
+                  % filter all output-actions form apply-actions
+                  FilteredApplyActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, not(is_record(A, ofp_action_output))],
+                  % set new filtered apply-actions to apply-action-instruction without ouput-action
+                  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = FilteredApplyActionList},
+                  % lager:info("Filtered Instructions: ~p", [FilteredInstructionList]),
+                  % lager:info("Final ApplyAction Instructions: ~p", [FinalApplyActionInstruction]),
+                  % lager:info("GotoTableInstruction: ~p", [GotoTableInstruction]),
+                  % create final instruction by filtered instructions without apply-actions-instruction
+                  %    + filtered apply-action-instruction without output-action
+                  %    + generated goto-table instruction
+                  FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction] ++ [GotoTableInstruction]
+              end
+          end
+      end,
+      %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
+      % insert instructions into flow entry and replace tableid
+      FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
     end,
-    %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
-    % insert instructions into flow entry and replace tableid
-    FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
-                      end,
   % log
   [begin
      StatsBody = Reply12#ofp_flow_stats_reply.body,
@@ -657,10 +659,11 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
    end
     || {TableId12, Reply12} <- Replies],
   % anonymous function to separate flow entries
-  SeparateFlowEntries = fun(TableId, Reply) ->
-    Body = Reply#ofp_flow_stats_reply.body,
-    [{TableId, FlowStat} || FlowStat <- Body]
-                        end,
+  SeparateFlowEntries =
+    fun(TableId, Reply) ->
+      Body = Reply#ofp_flow_stats_reply.body,
+      [{TableId, FlowStat} || FlowStat <- Body]
+    end,
   % rebuild reply
   FlowEntriesDeep = [SeparateFlowEntries(TableId, Reply) || {TableId, Reply} <- Replies],
   FlowEntries = lists:flatten(FlowEntriesDeep),
@@ -680,25 +683,30 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
 
 tv_request(Requests) ->
 % start transmitter
-  [spawn(fun() ->
-    tv_transmitter(TableId, Request)
-         end) || {TableId, Request} <- Requests].
+  [spawn(
+    fun() ->
+      tv_transmitter(TableId, Request)
+    end)
+    || {TableId, Request} <- Requests].
 
 tv_request(Requests, Timeout) ->
   % define caller
   Caller = self(),
   % define receiver processes
-  ReceiverPid = spawn_link(fun() ->
-    tablevisor_receiver(length(Requests), Timeout, Caller, [])
-                           end),
+  ReceiverPid = spawn_link(
+    fun() ->
+      tablevisor_receiver(length(Requests), Timeout, Caller, [])
+    end),
   % start transmitter
-  [spawn(fun() ->
-    tv_transmitter(TableId, Request, Timeout, ReceiverPid)
-         end) || {TableId, Request} <- Requests],
+  [spawn(
+    fun() ->
+      tv_transmitter(TableId, Request, Timeout, ReceiverPid)
+    end)
+    || {TableId, Request} <- Requests],
   % wait for response
   receive
     Any ->
-      lager:info("Responses: ~p", [Any]),
+      lager:debug("Responses: ~p", [Any]),
       Any
   after Timeout ->
     lager:error("Timeout"),
@@ -707,12 +715,12 @@ tv_request(Requests, Timeout) ->
 
 tablevisor_receiver(0, _Timeout, Caller, Replies) ->
   % all replies are collected, return all replies to caller process (tv_request)
-  % lager:info("Receiver 0: ~p", [Replies]),
+  lager:debug("All received messages: ~p", [Replies]),
   Caller ! Replies;
 tablevisor_receiver(N, Timeout, Caller, Replies) ->
   receive
     {ok, TableId, Reply} ->
-      %lager:info("Received Reply from ~p: ~p",[TableId, Reply]),
+      lager:debug("Received Reply from Table ~p: ~p", [TableId, Reply]),
       % add reply to list of replies
       Replies2 = [{TableId, Reply} | Replies],
       % recursivly restart new receiver
@@ -722,12 +730,13 @@ tablevisor_receiver(N, Timeout, Caller, Replies) ->
   end.
 
 tv_transmitter(TableId, Request, Timeout, ReceiverPid) ->
-  lager:info("send to ~p with message ~p", [TableId, Request]),
+  lager:debug("send to ~p with message ~p", [TableId, Request]),
   % convert request to valid OpenFlow message
   Message = tablevisor_ctrl4:message(Request),
   % send the request and wait for reply
   {reply, Reply} = tablevisor_ctrl4:send(TableId, Message, Timeout),
   % return reply to receiver
+  lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]),
   ReceiverPid ! {ok, TableId, Reply}.
 
 tv_transmitter(TableId, Request) ->
@@ -935,18 +944,20 @@ ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_feat
   % anonymous function to generate individual table request
   TableFeaturesRequest =
     fun(TableId, OriginalRequest) ->
-      ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+%%      ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
       #ofp_table_features_request{
-%%        flags = OriginalRequest#ofp_table_features_request.flags,
-%%        body = [#ofp_table_features{table_id = ProcessTableId}]
+        flags = OriginalRequest#ofp_table_features_request.flags
       }
     end,
   % build requests
   Requests = [{Tid, TableFeaturesRequest(Tid, Request)} || Tid <- TableIdList],
   % send requests and receives replies
   Replies = tv_request(Requests, 2000),
-  lager:info("Table Features Replies ~p", [Replies]),
-
+%%  lager:info("Table Features Replies ~p", [Replies]),
+  ParseReplies =
+    fun(TableId, Reply) ->
+      true
+    end,
   Reply = linc_us4_table_features:handle_req(SwitchId, Request),
   tablevisor_log("~sSend ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   {reply, Reply, State}.

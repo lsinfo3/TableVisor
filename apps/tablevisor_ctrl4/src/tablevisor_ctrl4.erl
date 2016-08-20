@@ -108,7 +108,8 @@ handle_socket(Socket, Waiters, BufferedData) ->
         end),
       handle_socket(Socket, Waiters, <<>>);
     {add_waiter, Waiter} ->
-      handle_socket(Socket, [Waiter | Waiters], <<>>);
+      lager:debug("Waiter ~p registered", [Waiter]),
+      handle_socket(Socket, [Waiter | Waiters], BufferedData);
     Other ->
       lager:error("Received unknown signal ~p", [Other]),
       handle_socket(Socket, Waiters, <<>>)
@@ -172,7 +173,7 @@ handle_input(Socket, Message) ->
           tablevisor_us4:ofp_packet_in(TableId, Message)
       end;
     #ofp_message{} ->
-      lager:info("Received message from ~p: ~p", [Socket, Message])
+      lager:debug("Received message from ~p: ~p", [Socket, Message])
     %_ ->
     %  lager:error("Unknown message: ~p", [Message])
   end.
@@ -418,8 +419,20 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   Socket = tablevisor_switch_get(TableId, socket),
   % build request for single switch
   Request = message(#ofp_port_stats_request{port_no = any}),
-  % send request and receive reply
-  {reply, Reply} = send(TableId, Request, 2000),
+  % get all port numbers from current table
+  PortNoReceiver = self(),
+  spawn(
+    fun() ->
+      {reply, Reply} = send(TableId, Request, 2000),
+      PortNoReceiver ! {reply, Reply}
+    end),
+  receive
+    {reply, Reply} ->
+      true
+  after 10000 ->
+    lager:error("No ofp_port_stats_reply from ~p", [TableId]),
+    Reply = false
+  end,
   % anonymous function for sending LLDP packets
   LLDPSender =
     fun(OutputPortNo) ->
@@ -539,7 +552,7 @@ send(Socket, Message, Timeout) ->
   Pid = tablevisor_switch_get(Socket, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
-  lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
