@@ -54,33 +54,35 @@ accept(LSocket) ->
   accept(LSocket).
 
 %% The echo client process.
-handle_socket(Socket, Waiters, Data1) ->
+handle_socket(Socket, Waiters, BufferedData) ->
   ok = inet:setopts(Socket, [{active, once}]),
   receive
-    {tcp, Socket, Data} ->
-      Data2 = <<Data1/binary, Data/binary>>,
-      <<_Version:8, _TypeInt:8, Length:16, _XID:32, _Binary2/bytes>> = Data2,
-      % lager:info("Version ~p, TypeInt ~p, Length ~p, Xid ~p, calculated Length ~p",[Version, TypeInt, Length, XID, byte_size(Data)]),
+    {tcp, Socket, DataInput} ->
+      ReceivedData = <<BufferedData/binary, DataInput/binary>>,
+      <<Version:8, Type:8, Length:16, Xid:32, _Binary2/bytes>> = ReceivedData,
+      lager:debug("Version ~p, Type ~p, Length ~p, Xid ~p, Bytestream Length ~p", [Version, Type, Length, Xid, byte_size(DataInput)]),
       case Length of
-        N when N > byte_size(Data2) ->
-          handle_socket(Socket, Waiters, Data2);
-        N when N < byte_size(Data2) ->
-          lager:error("Multiple OpenFlow messages in one TCP bytestream");
+        N when N > byte_size(ReceivedData) ->
+          % Wait for more data, bytestream is not complete
+          lager:debug("Bytestream to small, waiting for more data"),
+          handle_socket(Socket, Waiters, ReceivedData);
         _ ->
           true
       end,
+      % Bytestream is complete, cut current OpenFlow message and start parsing
+      <<DataParsing:Length/binary, DataWaiting/binary>> = ReceivedData,
       {ok, Parser} = ofp_parser:new(4),
-      lager:debug("InputData from ~p: ~p", [Socket, Data]),
-      Parsed = ofp_parser:parse(Parser, Data2),
+      lager:debug("InputData from ~p: ~p", [Socket, DataParsing]),
+      Parsed = ofp_parser:parse(Parser, ReceivedData),
       case Parsed of
         {ok, _, _} ->
           true;
         {error, Exception} ->
-          lager:error("Error while parsing ~p because ~p", [Data, Exception]),
+          lager:error("Error while parsing ~p because ~p", [DataParsing, Exception]),
           handle_socket(Socket, Waiters, <<>>)
       end,
       {ok, _NewParser, Messages} = Parsed,
-      lager:debug("Received messages from socket ~p", [Messages]),
+      lager:debug("Received messages from ~p: ~p", [Socket, Messages]),
       FilteredWaiters = filter_waiters(Waiters),
       lists:foreach(
         fun(Message) ->
@@ -91,7 +93,7 @@ handle_socket(Socket, Waiters, Data1) ->
               handle_input(Socket, Message)
             end)
         end, Messages),
-      handle_socket(Socket, FilteredWaiters, <<>>);
+      handle_socket(Socket, FilteredWaiters, DataWaiting);
   % close tcp socket by client (rb)
     {tcp_closed, Socket} ->
       tablevisor_switch_remove(Socket),

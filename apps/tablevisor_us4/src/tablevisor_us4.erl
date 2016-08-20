@@ -218,6 +218,13 @@ tablevisor_config_read_outportmap(SwitchConfig) ->
       []
   end.
 
+tablevisor_get_tableid_list(all) ->
+  tablevisor_ctrl4:tablevisor_tables();
+tablevisor_get_tableid_list(TableId) when is_integer(TableId) ->
+  [TableId];
+tablevisor_get_tableid_list(_) ->
+  [].
+
 %%%-----------------------------------------------------------------------------
 %%% Backend API
 %%%-----------------------------------------------------------------------------
@@ -922,9 +929,26 @@ ofp_table_stats_request(#state{switch_id = SwitchId} = State,
   {reply, #ofp_table_features_reply{},
     #state{}}.
 ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_features_request{} = Request) ->
-  tablevisor_log("~sReceived ~sfeatures-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
+  tablevisor_log("~sReceived ~stable-features-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
+  % get table id list
+  TableIdList = tablevisor_get_tableid_list(all),
+  % anonymous function to generate individual table request
+  TableFeaturesRequest =
+    fun(TableId, OriginalRequest) ->
+      ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+      #ofp_table_features_request{
+%%        flags = OriginalRequest#ofp_table_features_request.flags,
+%%        body = [#ofp_table_features{table_id = ProcessTableId}]
+      }
+    end,
+  % build requests
+  Requests = [{Tid, TableFeaturesRequest(Tid, Request)} || Tid <- TableIdList],
+  % send requests and receives replies
+  Replies = tv_request(Requests, 2000),
+  lager:info("Table Features Replies ~p", [Replies]),
+
   Reply = linc_us4_table_features:handle_req(SwitchId, Request),
-  tablevisor_log("~Send ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
+  tablevisor_log("~sSend ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   {reply, Reply, State}.
 
 %% @doc Get port description.
