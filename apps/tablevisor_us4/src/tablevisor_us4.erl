@@ -937,14 +937,14 @@ ofp_table_stats_request(#state{switch_id = SwitchId} = State,
 -spec ofp_table_features_request(state(), #ofp_table_features_request{}) ->
   {reply, #ofp_table_features_reply{},
     #state{}}.
-ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_features_request{} = Request) ->
+ofp_table_features_request(#state{switch_id = _SwitchId} = State, #ofp_table_features_request{} = Request) ->
   tablevisor_log("~sReceived ~stable-features-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   % get table id list
   TableIdList = tablevisor_get_tableid_list(all),
   % anonymous function to generate individual table request
   TableFeaturesRequest =
-    fun(TableId, OriginalRequest) ->
-%%      ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+    fun(_TableId, OriginalRequest) ->
+      %% ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
       #ofp_table_features_request{
         flags = OriginalRequest#ofp_table_features_request.flags
       }
@@ -953,14 +953,117 @@ ofp_table_features_request(#state{switch_id = SwitchId} = State, #ofp_table_feat
   Requests = [{Tid, TableFeaturesRequest(Tid, Request)} || Tid <- TableIdList],
   % send requests and receives replies
   Replies = tv_request(Requests, 2000),
-%%  lager:info("Table Features Replies ~p", [Replies]),
-  ParseReplies =
-    fun(TableId, Reply) ->
-      true
-    end,
-  Reply = linc_us4_table_features:handle_req(SwitchId, Request),
+  TableFeatures = [ofp_table_features_request_parse_tables(Tid, Reply) || {Tid, Reply} <- Replies],
+  Reply = #ofp_table_features_reply{body = TableFeatures},
+  %% Reply = linc_us4_table_features:handle_req(SwitchId, Request),
+%%  lager:warning("Reply ~p", [Reply]),
   tablevisor_log("~sSend ~sfeatures-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   {reply, Reply, State}.
+
+ofp_table_features_request_parse_tables(TableId, Reply) ->
+  ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get(TableId, processtable),
+  TableFeaturesList = Reply#ofp_table_features_reply.body,
+  ofp_table_features_request_filter_processtable(TableId, ProcessTableId, TableFeaturesList).
+
+ofp_table_features_request_filter_processtable(TableId, ProcessTableId, [TableFeatures | TableFeaturesList]) ->
+  case TableFeatures#ofp_table_features.table_id of
+    ProcessTableId ->
+      % metadata
+      MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
+      case MetadataProvider of
+        mac ->
+          MetadataMatch = <<255, 255, 255, 255, 255, 255, 0, 0>>,
+          MetadataWrite = <<255, 255, 255, 255, 255, 255, 0, 0>>;
+        _ ->
+          MetadataMatch = <<0, 0, 0, 0, 0, 0, 0, 0>>,
+          MetadataWrite = <<0, 0, 0, 0, 0, 0, 0, 0>>
+      end,
+      % properties
+      Properties = [
+        P || P <- [ofp_table_features_request_rewrite_properties(P) || P <- TableFeatures#ofp_table_features.properties],
+        P =/= false
+      ],
+      % build table features
+      TableFeatures#ofp_table_features{
+        table_id = TableId,
+        metadata_match = MetadataMatch,
+        metadata_write = MetadataWrite,
+        properties = Properties
+      };
+    _ ->
+      ofp_table_features_request_filter_processtable(TableId, ProcessTableId, TableFeaturesList)
+  end;
+ofp_table_features_request_filter_processtable(_TableId, _ProcessTableId, []) ->
+  [].
+
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_instructions) ->
+  Property;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_instructions_miss) ->
+  Property;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_next_tables) ->
+  Property;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_next_tables_miss) ->
+  Property;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_write_actions) ->
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_write_actions_miss) ->
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_apply_actions) ->
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_apply_actions_miss) ->
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_match) ->
+  lager:debug("#ofp_table_feature_prop_match: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_wildcards) ->
+  lager:debug("#ofp_table_feature_prop_wildcards: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_write_setfield) ->
+  lager:debug("#ofp_table_feature_prop_write_setfield: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_write_setfield_miss) ->
+  lager:debug("#ofp_table_feature_prop_write_setfield_miss: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_apply_setfield) ->
+  lager:debug("#ofp_table_feature_prop_apply_setfield: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_apply_setfield_miss) ->
+  lager:debug("#ofp_table_feature_prop_apply_setfield_miss: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_experimenter) ->
+  lager:debug("#ofp_table_feature_prop_experimenter: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property)
+  when is_record(Property, ofp_table_feature_prop_experimenter_miss) ->
+  lager:debug("#ofp_table_feature_prop_experimenter_miss: ~p", [Property]),
+  %% TODO
+  false;
+ofp_table_features_request_rewrite_properties(Property) ->
+  lager:warning("Unknown table_feature_property: ~p", [Property]),
+  false.
+
 
 %% @doc Get port description.
 -spec ofp_port_desc_request(state(), ofp_port_desc_request()) ->

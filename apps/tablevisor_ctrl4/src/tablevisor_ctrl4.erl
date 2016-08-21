@@ -552,7 +552,7 @@ send(Socket, Message, Timeout) ->
   Pid = tablevisor_switch_get(Socket, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
-  lager:info("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
+  lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
