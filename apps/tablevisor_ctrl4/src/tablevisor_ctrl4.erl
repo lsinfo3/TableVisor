@@ -28,7 +28,9 @@
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
   tablevisor_wait_for_switches/0,
-  tablevisor_topology_discovery/0
+  tablevisor_topology_discovery/0,
+  tablevisor_multi_request/1,
+  tablevisor_multi_request/2
 ]).
 
 
@@ -532,6 +534,76 @@ tablevisor_digraph_get_edge(Graph, V1, V2, [Edge | EdgeList]) ->
 tablevisor_digraph_get_edge(_Graph, _V1, _V2, []) ->
   false.
 
+%%%-----------------------------------------------------------------------------
+%%% TableVisor Sender and Receiver Functions
+%%%-----------------------------------------------------------------------------
+
+tablevisor_multi_request(Requests) ->
+% start transmitter
+  [spawn(
+    fun() ->
+      tablevisor_transmitter(TableId, Request)
+    end)
+    || {TableId, Request} <- Requests].
+
+tablevisor_multi_request(Requests, Timeout) ->
+  % define caller
+  Caller = self(),
+  % define receiver processes
+  ReceiverPid = spawn_link(
+    fun() ->
+      tablevisor_multi_receiver(length(Requests), Timeout, Caller, [])
+    end),
+  % start transmitter
+  [spawn(
+    fun() ->
+      tablevisor_transmitter(TableId, Request, Timeout, ReceiverPid)
+    end)
+    || {TableId, Request} <- Requests],
+  % wait for response
+  receive
+    Any ->
+      lager:debug("Responses: ~p", [Any]),
+      Any
+  after Timeout ->
+    lager:error("Timeout"),
+    []
+  end.
+
+tablevisor_multi_receiver(0, _Timeout, Caller, Replies) ->
+  % all replies are collected, return all replies to caller process (tv_request)
+  lager:debug("All received messages: ~p", [Replies]),
+  Caller ! Replies;
+tablevisor_multi_receiver(N, Timeout, Caller, Replies) ->
+  receive
+    {ok, TableId, Reply} ->
+      lager:debug("Received Reply from Table ~p: ~p", [TableId, Reply]),
+      % add reply to list of replies
+      Replies2 = [{TableId, Reply} | Replies],
+      % recursivly restart new receiver
+      tablevisor_multi_receiver(N - 1, Timeout, Caller, Replies2)
+  after Timeout ->
+    lager:error("Timeout")
+  end.
+
+tablevisor_transmitter(TableId, Request, Timeout, ReceiverPid) ->
+  lager:debug("send to ~p with message ~p", [TableId, Request]),
+  % convert request to valid OpenFlow message
+  Message = tablevisor_ctrl4:message(Request),
+  % send the request and wait for reply
+  {reply, Reply} = tablevisor_ctrl4:send(TableId, Message, Timeout),
+  % return reply to receiver
+  lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]),
+  ReceiverPid ! {ok, TableId, Reply}.
+
+tablevisor_transmitter(TableId, Request) ->
+  lager:info("send to ~p with message ~p", [TableId, Request]),
+  % convert request to valid OpenFlow message
+  Message = tablevisor_ctrl4:message(Request),
+  % send the request and wait for reply
+  {noreply, ok} = tablevisor_ctrl4:send(TableId, Message),
+  % return reply to receiver
+  {ok, TableId}.
 
 %%%-----------------------------------------------------------------------------
 %%% Sender

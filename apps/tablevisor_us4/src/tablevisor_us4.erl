@@ -341,7 +341,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
             end,
   [LogFlow(TableId5, FlowMod3) || {TableId5, FlowMod3} <- Requests2],
   % send requests and receives replies
-  tv_request(Requests2),
+  tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
 
 apply_metadata2mac_provider({TableId3, FlowMod1}) ->
@@ -595,7 +595,7 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
    end
     || {TableId11, #ofp_flow_stats_request{table_id = TableId12}} <- Requests],
   % send requests and receives replies
-  Replies = tv_request(Requests, 2000),
+  Replies = tablevisor_ctrl4:tablevisor_multi_request(Requests, 2000),
   % anonymous function to refactor flow entries
   RefactorFlowEntry =
     fun(TableId, FlowEntry) ->
@@ -680,74 +680,6 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   % return
   lager:info("Reply ~p", [Reply]),
   {reply, Reply, State}.
-
-tv_request(Requests) ->
-% start transmitter
-  [spawn(
-    fun() ->
-      tv_transmitter(TableId, Request)
-    end)
-    || {TableId, Request} <- Requests].
-
-tv_request(Requests, Timeout) ->
-  % define caller
-  Caller = self(),
-  % define receiver processes
-  ReceiverPid = spawn_link(
-    fun() ->
-      tablevisor_receiver(length(Requests), Timeout, Caller, [])
-    end),
-  % start transmitter
-  [spawn(
-    fun() ->
-      tv_transmitter(TableId, Request, Timeout, ReceiverPid)
-    end)
-    || {TableId, Request} <- Requests],
-  % wait for response
-  receive
-    Any ->
-      lager:debug("Responses: ~p", [Any]),
-      Any
-  after Timeout ->
-    lager:error("Timeout"),
-    []
-  end.
-
-tablevisor_receiver(0, _Timeout, Caller, Replies) ->
-  % all replies are collected, return all replies to caller process (tv_request)
-  lager:debug("All received messages: ~p", [Replies]),
-  Caller ! Replies;
-tablevisor_receiver(N, Timeout, Caller, Replies) ->
-  receive
-    {ok, TableId, Reply} ->
-      lager:debug("Received Reply from Table ~p: ~p", [TableId, Reply]),
-      % add reply to list of replies
-      Replies2 = [{TableId, Reply} | Replies],
-      % recursivly restart new receiver
-      tablevisor_receiver(N - 1, Timeout, Caller, Replies2)
-  after Timeout ->
-    lager:error("Timeout")
-  end.
-
-tv_transmitter(TableId, Request, Timeout, ReceiverPid) ->
-  lager:debug("send to ~p with message ~p", [TableId, Request]),
-  % convert request to valid OpenFlow message
-  Message = tablevisor_ctrl4:message(Request),
-  % send the request and wait for reply
-  {reply, Reply} = tablevisor_ctrl4:send(TableId, Message, Timeout),
-  % return reply to receiver
-  lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]),
-  ReceiverPid ! {ok, TableId, Reply}.
-
-tv_transmitter(TableId, Request) ->
-  lager:info("send to ~p with message ~p", [TableId, Request]),
-  % convert request to valid OpenFlow message
-  Message = tablevisor_ctrl4:message(Request),
-  % send the request and wait for reply
-  {noreply, ok} = tablevisor_ctrl4:send(TableId, Message),
-  % return reply to receiver
-  {ok, TableId}.
-
 
 tablevsior_preparelog() ->
   filelib:ensure_dir("rel/log/"),
@@ -953,7 +885,7 @@ ofp_table_features_request(#state{switch_id = _SwitchId} = State, #ofp_table_fea
   % build requests
   Requests = [{Tid, TableFeaturesRequest(Tid, Request)} || Tid <- TableIdList],
   % send requests and receives replies
-  Replies = tv_request(Requests, 2000),
+  Replies = tablevisor_ctrl4:tablevisor_multi_request(Requests, 2000),
   TableFeatures = [ofp_table_features_request_parse_tables(Tid, Reply) || {Tid, Reply} <- Replies],
   Reply = #ofp_table_features_reply{body = TableFeatures},
   %% Reply = linc_us4_table_features:handle_req(SwitchId, Request),
