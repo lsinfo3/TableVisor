@@ -503,12 +503,10 @@ tablevisor_topology_discovery_build_digraph(G, []) ->
 
 tablevisor_topology_discovery_apply(Graph) ->
   Tables = lists:sort(tablevisor_tables()),
-  List1 = lists:sublist(Tables, 1, length(Tables) - 1),
-  List2 = lists:sublist(Tables, 2, length(Tables)),
-  RequiredConnections = lists:zip(List1, List2),
-  tablevisor_topology_discovery_connection_from_graph(Graph, RequiredConnections).
+  [SrcTableId | DstTableList] = Tables,
+  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, DstTableList, DstTableList).
 
-tablevisor_topology_discovery_connection_from_graph(Graph, [{SrcTableId, DstTableId} | RequiredConnections]) ->
+tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, [DstTableId | DstTableList], SrcTableList) ->
   Edge = tablevisor_digraph_get_edge(Graph, SrcTableId, DstTableId),
   case Edge of
     {_E, V1, V2, {P1, P2}} ->
@@ -516,11 +514,14 @@ tablevisor_topology_discovery_connection_from_graph(Graph, [{SrcTableId, DstTabl
       OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
       OutportMap2 = OutportMap ++ [{V2, P1}],
       tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);
-    false ->
-      lager:error("No Connection found:  [ Switch ~p ]--      ?      --[ Switch ~p ]", [SrcTableId, DstTableId])
+    _ ->
+      true
+    % lager:error("No Connection found:  [ Switch ~p ]--       ?      --[ Switch ~p ]", [SrcTableId, DstTableId])
   end,
-  tablevisor_topology_discovery_connection_from_graph(Graph, RequiredConnections);
-tablevisor_topology_discovery_connection_from_graph(_Graph, []) ->
+  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, DstTableList, SrcTableList);
+tablevisor_topology_discovery_connection_from_graph(Graph, _SrcTableId, [], [SrcTableId | SrcTableList]) ->
+  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, SrcTableList, SrcTableList);
+tablevisor_topology_discovery_connection_from_graph(_Graph, _SrcTableId, [], []) ->
   true.
 
 tablevisor_digraph_get_edge(Graph, V1, V2) ->
@@ -531,7 +532,7 @@ tablevisor_digraph_get_edge(Graph, V1, V2, [Edge | EdgeList]) ->
   case E of
     {_E, V1, V2, _Label} ->
       E;
-    false ->
+    _ ->
       tablevisor_digraph_get_edge(Graph, V1, V2, EdgeList)
   end;
 tablevisor_digraph_get_edge(_Graph, _V1, _V2, []) ->
