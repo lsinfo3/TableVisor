@@ -178,9 +178,12 @@ tablevisor_read_config(_SwitchId, Config) ->
   ets:new(tablevisor_config, [public, named_table, {read_concurrency, true}]),
   {tablevisor_config, TVConfig} = lists:keyfind(tablevisor_config, 1, Switch),
   case lists:keyfind(metadata_provider, 1, TVConfig) of
-    {metadata_provider, mac} ->
-      ets:insert(tablevisor_config, {metadata_provider, mac}),
-      lager:info("Set metadata provider: MAC-Address.");
+    {metadata_provider, srcmac} ->
+      ets:insert(tablevisor_config, {metadata_provider, srcmac}),
+      lager:info("Set metadata provider: Source MAC address.");
+    {metadata_provider, dstmac} ->
+      ets:insert(tablevisor_config, {metadata_provider, dstmac}),
+      lager:info("Set metadata provider: Destination MAC address.");
     false ->
       false
   end.
@@ -329,8 +332,10 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % build requests by applying matadata to mac matching
   MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
   case MetadataProvider of
-    mac ->
-      Requests2 = [apply_metadata2mac_provider(Request) || Request <- Requests];
+    srcmac ->
+      Requests2 = [apply_metadata_provider(srcmac, Request) || Request <- Requests];
+    dstmac ->
+      Requests2 = [apply_metadata_provider(dstmac, Request) || Request <- Requests];
     _ ->
       Requests2 = Requests
   end,
@@ -344,7 +349,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
 
-apply_metadata2mac_provider({TableId3, FlowMod1}) ->
+apply_metadata_provider(Type, {TableId3, FlowMod1}) ->
   TargetInstruction = filter_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions),
   case TargetInstruction == [] of
     true ->
@@ -355,14 +360,14 @@ apply_metadata2mac_provider({TableId3, FlowMod1}) ->
       FlowMod2 = FlowMod1#ofp_flow_mod{
         instructions = remove_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions)
       },
-      % remove set eth dst field
+      % remove set eth field
       FlowMod3 = FlowMod2#ofp_flow_mod{
-        instructions = remove_flowmod_action_set_ethdst(FlowMod2#ofp_flow_mod.instructions)
+        instructions = remove_flowmod_action_set_field(Type, FlowMod2#ofp_flow_mod.instructions)
       },
       MetadataInstruction = hd(TargetInstruction),
-      % set set eth dst field from metadata
+      % set set eth field from metadata
       FlowMod4 = FlowMod3#ofp_flow_mod{
-        instructions = add_flowmod_action_set_ethdst_from_metadata(FlowMod3#ofp_flow_mod.instructions, MetadataInstruction#ofp_instruction_write_metadata.metadata)
+        instructions = add_flowmod_action_set_eth_from_metadata(Type, FlowMod3#ofp_flow_mod.instructions, MetadataInstruction#ofp_instruction_write_metadata.metadata)
       }
   end,
   {TableId3, FlowMod4}.
@@ -379,10 +384,28 @@ remove_flowmod_instruction_metadata(InstructionList) ->
 filter_flowmod_instruction_metadata(InstructionList) ->
   [I || I <- InstructionList, is_record(I, ofp_instruction_write_metadata)].
 
-% remove flowmod set dst mac address action
--spec remove_flowmod_action_set_ethdst([ofp_instruction()])
+% remove flowmod set mac address action
+-spec remove_flowmod_action_set_field(_Type, [ofp_instruction()])
       -> {[ofp_instruction()]}.
-remove_flowmod_action_set_ethdst(InstructionList) ->
+remove_flowmod_action_set_field(srcmac, InstructionList) ->
+  ApplyInstruction = safehd([I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)]),
+  case ApplyInstruction == nil of
+    true ->
+      InstructionList;
+    false ->
+      SetFieldActionList = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_set_field)],
+      case SetFieldActionList == [] of
+        true ->
+          InstructionList;
+        false ->
+          SetFieldActionList2 = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions,
+            not(is_record(A, ofp_action_set_field)) orelse
+              (is_record(A, ofp_action_set_field) and is_record(A#ofp_action_set_field.field, ofp_field) and (A#ofp_action_set_field.field#ofp_field.name /= eth_src))],
+          InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [#ofp_instruction_apply_actions{actions = SetFieldActionList2}],
+          InstructionList2
+      end
+  end;
+remove_flowmod_action_set_field(dstmac, InstructionList) ->
   ApplyInstruction = safehd([I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)]),
   case ApplyInstruction == nil of
     true ->
@@ -402,9 +425,23 @@ remove_flowmod_action_set_ethdst(InstructionList) ->
   end.
 
 % add flowmod set dst mac address action from metadata
--spec add_flowmod_action_set_ethdst_from_metadata([ofp_instruction()], term())
+-spec add_flowmod_action_set_eth_from_metadata(_Type, [ofp_instruction()], term())
       -> {[ofp_instruction()]}.
-add_flowmod_action_set_ethdst_from_metadata(InstructionList, Metadata) ->
+add_flowmod_action_set_eth_from_metadata(srcmac, InstructionList, Metadata) ->
+  <<_:16, CuttedMetadata/binary>> = Metadata,
+  lager:info("InstructionList ~p", [InstructionList]),
+  NewSetEthDstAction = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = CuttedMetadata}},
+  ApplyInstructionList = [I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)],
+  lager:info("ApplyInstructionList ~p", [ApplyInstructionList]),
+  case ApplyInstructionList == [] of
+    true ->
+      ApplyInstruction = #ofp_instruction_apply_actions{actions = []};
+    false ->
+      [ApplyInstruction | _] = ApplyInstructionList
+  end,
+  InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [ApplyInstruction#ofp_instruction_apply_actions{actions = ApplyInstruction#ofp_instruction_apply_actions.actions ++ [NewSetEthDstAction]}],
+  InstructionList2;
+add_flowmod_action_set_eth_from_metadata(dstmac, InstructionList, Metadata) ->
   <<_:16, CuttedMetadata/binary>> = Metadata,
   lager:info("InstructionList ~p", [InstructionList]),
   NewSetEthDstAction = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = CuttedMetadata}},
@@ -733,91 +770,98 @@ tvlc(Color, Style, Background) ->
 
 tablevisor_logformat_flowmod(Flow) ->
   Commons = io_lib:format("FLOW-MOD: Table ID: ~w, Priority: ~w", [Flow#ofp_flow_mod.table_id, Flow#ofp_flow_mod.priority]),
-  {_, MatchList1} = Flow#ofp_flow_mod.match,
-  MatchList2 = [tablevisor_logformat_flow_match(M) || M <- MatchList1],
-  MatchList3 = tablevisor_logformat_filteroutnils(MatchList2),
-  Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
-  InstructionList1 = Flow#ofp_flow_mod.instructions,
-  InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
-  Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
+  MatchList = tablevisor_logformat_flow_match(Flow#ofp_flow_mod.match),
+  Matches = string:concat("  MATCHES: ", string:join(MatchList, ", ")),
+  InstructionList = tablevisor_logformat_flow_instruction(Flow#ofp_flow_mod.instructions),
+  Actions = string:concat("  ACTIONS: ", string:join(InstructionList, ", ")),
   io_lib:format(string:join(["", Commons, Matches, Actions], "~n             "), []).
 
 tablevisor_logformat_flowstats(Flow) ->
   Commons = io_lib:format("FLOW-STAT: Table ID: ~w, Priority: ~w", [Flow#ofp_flow_stats.table_id, Flow#ofp_flow_stats.priority]),
-  {_, MatchList1} = Flow#ofp_flow_stats.match,
-  MatchList2 = [tablevisor_logformat_flow_match(M) || M <- MatchList1],
-  MatchList3 = tablevisor_logformat_filteroutnils(MatchList2),
-  Matches = string:concat("  MATCHES: ", string:join(MatchList3, ", ")),
-  InstructionList1 = Flow#ofp_flow_stats.instructions,
-  InstructionList2 = [tablevisor_logformat_flow_instruction(I) || I <- InstructionList1],
-  InstructionList3 = lists:append(tablevisor_logformat_filteroutnils(InstructionList2)),
-  Actions = string:concat("  ACTIONS: ", string:join(InstructionList3, ", ")),
+  MatchList = tablevisor_logformat_flow_match(Flow#ofp_flow_stats.match),
+  Matches = string:concat("  MATCHES: ", string:join(MatchList, ", ")),
+  InstructionList = tablevisor_logformat_flow_instruction(Flow#ofp_flow_mod.instructions),
+  Actions = string:concat("  ACTIONS: ", string:join(InstructionList, ", ")),
   StatsList2 = tablevisor_logformat_flow_stats(Flow),
   Stats = string:concat("  STATS: ", string:join(StatsList2, ", ")),
   io_lib:format(string:join(["", Commons, Matches, Actions, Stats], "~n             "), []).
 
-tablevisor_logformat_flow_match(Match) ->
-  case Match of
-    #ofp_field{name = in_port, value = Value} ->
-      io_lib:format("In Port: ~p", [binary_to_int(Value)]);
-    #ofp_field{name = eth_type, value = Value} ->
-      io_lib:format("EtherType: 0x~4.16.0B", [binary_to_int(Value)]);
-    #ofp_field{name = eth_src, value = Value} ->
-      io_lib:format("Src. MAC: ~s", [binary_to_mac(Value)]);
-    #ofp_field{name = eth_dst, value = Value} ->
-      io_lib:format("Dst. MAC: ~s", [binary_to_mac(Value)]);
-    #ofp_field{name = ipv4_src, value = Value, mask = Mask} ->
-      io_lib:format("Src. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)]);
-    #ofp_field{name = ipv4_dst, value = Value, mask = Mask} ->
-      io_lib:format("Dst. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)]);
-    #ofp_field{name = mpls_label, value = Value} ->
-      io_lib:format("MPLS Label: ~s", [binary_to_mpls_label(Value)]);
-    #ofp_field{name = mpls_bos, value = Value} ->
-      io_lib:format("MPLS BOS: ~s", [binary_to_mpls_bos(Value)]);
-    _ ->
-      false
-  end.
+
+tablevisor_logformat_flow_match({ofp_match, Matches}) ->
+  tablevisor_logformat_flow_match(Matches, []).
+
+tablevisor_logformat_flow_match([], Reply) ->
+  Reply;
+tablevisor_logformat_flow_match([#ofp_field{name = in_port, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("In Port: ~p", [binary_to_int(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = eth_type, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("EtherType: 0x~4.16.0B", [binary_to_int(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = eth_src, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Src. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = eth_dst, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Dst. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = ipv4_src, value = Value, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Src. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = ipv4_dst, value = Value, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Dst. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = mpls_label, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("MPLS Label: ~s", [binary_to_mpls_label(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = mpls_bos, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("MPLS BOS: ~s", [binary_to_mpls_bos(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([_Match | Matches], Reply) ->
+  tablevisor_logformat_flow_match(Matches, Reply).
+
+tablevisor_logformat_flow_instruction(Instructions) ->
+  tablevisor_logformat_flow_instruction(Instructions, []).
+
+tablevisor_logformat_flow_instruction([], Reply) ->
+  Reply;
+tablevisor_logformat_flow_instruction([#ofp_instruction_goto_table{table_id = TableId} | Instructions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Goto Table: ~p", [TableId])],
+  tablevisor_logformat_flow_instruction(Instructions, Reply2);
+tablevisor_logformat_flow_instruction([#ofp_instruction_apply_actions{actions = Actions} | Instructions], Reply) ->
+  ActionList = tablevisor_logformat_flow_action(Actions),
+  Reply2 = Reply ++ ActionList,
+  tablevisor_logformat_flow_instruction(Instructions, Reply2);
+tablevisor_logformat_flow_instruction([#ofp_instruction_write_metadata{metadata = Metadata, metadata_mask = MetadataMask} | Instructions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Write Metadata: ~s/~s", [binary_to_metadata(Metadata), binary_to_metadata(MetadataMask)])],
+  tablevisor_logformat_flow_instruction(Instructions, Reply2);
+tablevisor_logformat_flow_instruction([_Instruction | Instructions], Reply) ->
+  tablevisor_logformat_flow_instruction(Instructions, Reply).
+
+tablevisor_logformat_flow_action(Actions) ->
+  tablevisor_logformat_flow_action(Actions, []).
+
+tablevisor_logformat_flow_action([], Reply) ->
+  Reply;
+tablevisor_logformat_flow_action([#ofp_action_output{port = Port} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Output: ~p", [Port])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_pop_mpls{ethertype = EthType} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("POP MPLS: 0x~4.16.0B", [EthType])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set Src. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set Dst. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([_Action | Actions], Reply) ->
+  tablevisor_logformat_flow_action(Actions, Reply).
 
 tablevisor_logformat_flow_stats(Flow) ->
   [
     io_lib:format("Packet Count: ~w", [Flow#ofp_flow_stats.packet_count]),
     io_lib:format("Duration (sec): ~w", [Flow#ofp_flow_stats.duration_sec])
   ].
-
-tablevisor_logformat_flow_instruction(Instruction) ->
-  FormatActions = fun(Action) ->
-    case Action of
-      #ofp_action_output{port = Port} ->
-        io_lib:format("Output: ~p", [Port]);
-      #ofp_action_pop_mpls{ethertype = EthType} ->
-        io_lib:format("POP MPLS: 0x~4.16.0B", [EthType]);
-      #ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value}} ->
-        io_lib:format("Set Src. MAC: ~s", [binary_to_mac(Value)]);
-      #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value}} ->
-        io_lib:format("Set Dst. MAC: ~s", [binary_to_mac(Value)]);
-      _ ->
-        false
-    end
-                  end,
-  case Instruction of
-    #ofp_instruction_goto_table{table_id = TableId} ->
-      io_lib:format("Goto Table: ~p", [TableId]);
-    #ofp_instruction_apply_actions{actions = ActionList1} ->
-      ActionList2 = [FormatActions(A) || A <- ActionList1],
-      ActionList3 = tablevisor_logformat_filteroutnils(ActionList2),
-      case ActionList3 of
-        [] -> false;
-        _ -> ActionList3
-      end;
-    #ofp_instruction_write_metadata{metadata = Metadata, metadata_mask = MetadataMask} ->
-      io_lib:format("Write Metadata: ~s/~s", [binary_to_metadata(Metadata), binary_to_metadata(MetadataMask)]);
-    _ ->
-      false
-  end.
-
-tablevisor_logformat_filteroutnils(List) ->
-  lists:filter(fun(Element) -> Element /= false end, List).
 
 binary_to_int(Bin) ->
   Size = size(Bin),
