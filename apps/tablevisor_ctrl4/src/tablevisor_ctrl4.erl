@@ -197,11 +197,14 @@ message(Body) ->
   message(Body, Xid).
 
 message(Body, Xid) ->
-  #ofp_message{version = 4,
+  #ofp_message{
+    version = 4,
     xid = Xid,
-    body = Body}.
+    body = Body
+  }.
 
 get_xid() ->
+  random:seed(erlang:now()),
   random:uniform(1 bsl 32 - 1).
 
 binary_to_int(Bin) ->
@@ -339,6 +342,8 @@ tablevisor_wait_for_switches([]) ->
 tablevisor_topology_discovery() ->
   Timeout = 2, % Timeout in seconds
   tablevisor_topology_discovery_flowmod(Timeout),
+  % sleep timer for slow router boards with very large table features reply
+  timer:sleep(3000),
   ReceiverPidList = tablevisor_topology_discovery_listener(),
   tablevisor_topology_discovery_lldp(),
   timer:sleep(Timeout * 1000),
@@ -353,20 +358,30 @@ tablevisor_topology_discovery_flowmod(FlowModTimeout) ->
 tablevisor_topology_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
   % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
+  % build request for single switch
+  Request = #ofp_table_features_request{},
+  % get all port numbers from current table
+  [{_TableId, TableFeaturesReply} | _] = tablevisor_multi_request([{TableId, Request}], 2000),
+  TableList = [TableFeatures#ofp_table_features.table_id || TableFeatures <- TableFeaturesReply#ofp_table_features_reply.body],
   % generate Flow mod to push all LLDP packets to controller
-  FlowMod = message(#ofp_flow_mod{
-    table_id = 0,
-    command = add,
-    hard_timeout = FlowModTimeout + 1,
-    idle_timeout = FlowModTimeout + 1,
-    priority = 255,
-    flags = [],
-    match = #ofp_match{fields = [#ofp_field{name = eth_type, value = <<16#88cc:16>>}]},
-    instructions = [#ofp_instruction_apply_actions{actions = [#ofp_action_output{port = controller}]}]
-  }),
-  % send packet to switch
-  do_send(Socket, FlowMod),
-  % continue with topology discovery flowmods with other tables
+  [
+    begin
+      FlowMod = message(#ofp_flow_mod{
+        table_id = Tid,
+        command = add,
+        hard_timeout = FlowModTimeout + 10,
+        idle_timeout = FlowModTimeout + 10,
+        priority = 255,
+        flags = [],
+        match = #ofp_match{fields = [#ofp_field{name = eth_type, value = <<16#88cc:16>>}]},
+        instructions = [#ofp_instruction_apply_actions{actions = [#ofp_action_output{port = controller}]}]
+      }),
+      % send packet to switch
+      do_send(Socket, FlowMod)
+    end
+    || Tid <- TableList
+  ],
+% continue with topology discovery flowmods with other tables
   tablevisor_topology_discovery_flowmod(Tables, FlowModTimeout);
 tablevisor_topology_discovery_flowmod([], _FlowModTimeout) ->
   true.
@@ -420,21 +435,9 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
   % get socket for current table (switch)
   Socket = tablevisor_switch_get(TableId, socket),
   % build request for single switch
-  Request = message(#ofp_port_stats_request{port_no = any}),
+  Request = #ofp_port_stats_request{port_no = any},
   % get all port numbers from current table
-  PortNoReceiver = self(),
-  spawn(
-    fun() ->
-      {reply, Reply} = send(TableId, Request, 2000),
-      PortNoReceiver ! {reply, Reply}
-    end),
-  receive
-    {reply, Reply} ->
-      true
-  after 10000 ->
-    lager:error("No ofp_port_stats_reply from ~p", [TableId]),
-    Reply = false
-  end,
+  [{_TableId, PortStatsReply} | _] = tablevisor_multi_request([{TableId, Request}], 2000),
   % anonymous function for sending LLDP packets
   LLDPSender =
     fun(OutputPortNo) ->
@@ -459,7 +462,7 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
       true ->
         true
     end
-    || PortStats <- Reply#ofp_port_stats_reply.body
+    || PortStats <- PortStatsReply#ofp_port_stats_reply.body
   ],
   % continue with topology discovery with other tables
   tablevisor_topology_discovery_lldp(Tables);
@@ -509,12 +512,12 @@ tablevisor_topology_discovery_connection_from_graph(Graph, [{SrcTableId, DstTabl
   Edge = tablevisor_digraph_get_edge(Graph, SrcTableId, DstTableId),
   case Edge of
     {_E, V1, V2, {P1, P2}} ->
-      lager:info("Connection from Switch ~p Port ~p to Switch ~p Port ~p discovered.", [V1, P1, V2, P2]),
+      lager:info("Discovered Connection:  [ Switch ~p ]--(~p)--------(~p)--[ Switch ~p ]", [V1, P1, P2, V2]),
       OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
       OutportMap2 = OutportMap ++ [{V2, P1}],
       tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);
     false ->
-      lager:error("No Connection from Switch ~p to Switch ~p found!", [SrcTableId, DstTableId])
+      lager:error("No Connection found:  [ Switch ~p ]--      ?      --[ Switch ~p ]", [SrcTableId, DstTableId])
   end,
   tablevisor_topology_discovery_connection_from_graph(Graph, RequiredConnections);
 tablevisor_topology_discovery_connection_from_graph(_Graph, []) ->
@@ -550,7 +553,7 @@ tablevisor_multi_request(Requests, Timeout) ->
   % define caller
   Caller = self(),
   % define receiver processes
-  ReceiverPid = spawn_link(
+  ReceiverPid = spawn(
     fun() ->
       tablevisor_multi_receiver(length(Requests), Timeout, Caller, [])
     end),
@@ -562,9 +565,9 @@ tablevisor_multi_request(Requests, Timeout) ->
     || {TableId, Request} <- Requests],
   % wait for response
   receive
-    Any ->
-      lager:debug("Responses: ~p", [Any]),
-      Any
+    {replies, Replies} ->
+      lager:debug("Responses from ~p: ~p", [ReceiverPid, Replies]),
+      Replies
   after Timeout ->
     lager:error("Timeout"),
     []
@@ -572,8 +575,9 @@ tablevisor_multi_request(Requests, Timeout) ->
 
 tablevisor_multi_receiver(0, _Timeout, Caller, Replies) ->
   % all replies are collected, return all replies to caller process (tv_request)
-  lager:debug("All received messages: ~p", [Replies]),
-  Caller ! Replies;
+  lager:debug("Received messages by ~p to be sent to ~p: ~p", [self(), Caller, Replies]),
+  Caller ! {replies, Replies},
+  true;
 tablevisor_multi_receiver(N, Timeout, Caller, Replies) ->
   receive
     {ok, TableId, Reply} ->
