@@ -631,7 +631,22 @@ send(Socket, Message, Timeout) ->
   Xid = Message#ofp_message.xid,
   lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
   do_send(Socket, Message),
+  send_multipart_receiver(Xid, Socket, Timeout).
+
+send_multipart_receiver(Xid, Socket, Timeout) ->
+  send_multipart_receiver(Xid, Socket, Timeout, []).
+send_multipart_receiver(Xid, Socket, Timeout, PreviousReplyBody) ->
   receive
+    {msg, Reply = #ofp_message{body = #ofp_table_features_reply{}}, Xid} ->
+      lager:debug("Received table_features_reply from ~p, xid ~p, message ~p", [Socket, Xid, Reply]),
+      ReplyBody = PreviousReplyBody ++ Reply#ofp_message.body#ofp_table_features_reply.body,
+      More = lists:member(more, Reply#ofp_message.body#ofp_table_features_reply.flags),
+      case More of
+        true ->
+          send_multipart_receiver(Xid, Socket, Timeout, ReplyBody);
+        _ ->
+          {reply, Reply#ofp_message.body#ofp_table_features_reply{body = ReplyBody}}
+      end;
     {msg, Reply, Xid} ->
       ReplyBody = Reply#ofp_message.body,
       lager:debug("Received from ~p, xid ~p, message ~p", [Socket, Xid, Reply]),
@@ -640,6 +655,7 @@ send(Socket, Message, Timeout) ->
     lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
     {error, timeout}
   end.
+
 
 do_send(Socket, Message) when is_tuple(Message) ->
   case of_protocol:encode(Message) of
