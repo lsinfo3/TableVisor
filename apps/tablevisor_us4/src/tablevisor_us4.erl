@@ -350,121 +350,122 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   {noreply, State}.
 
 apply_metadata_provider(Type, {TableId3, FlowMod1}) ->
-  TargetInstruction = filter_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions),
-  case TargetInstruction == [] of
-    true ->
-      % there are no write metadata -> return original untouched flow mod
-      FlowMod4 = FlowMod1;
-    false ->
-      % remove write metadata instructions
-      FlowMod2 = FlowMod1#ofp_flow_mod{
-        instructions = remove_flowmod_instruction_metadata(FlowMod1#ofp_flow_mod.instructions)
-      },
-      % remove set eth field
-      FlowMod3 = FlowMod2#ofp_flow_mod{
-        instructions = remove_flowmod_action_set_field(Type, FlowMod2#ofp_flow_mod.instructions)
-      },
-      MetadataInstruction = hd(TargetInstruction),
-      % set set eth field from metadata
-      FlowMod4 = FlowMod3#ofp_flow_mod{
-        instructions = add_flowmod_action_set_eth_from_metadata(Type, FlowMod3#ofp_flow_mod.instructions, MetadataInstruction#ofp_instruction_write_metadata.metadata)
-      }
-  end,
+  % remove set eth field
+  FlowMod2 = FlowMod1#ofp_flow_mod{
+    instructions = remove_flowmod_action_set_field(Type, FlowMod1#ofp_flow_mod.instructions)
+  },
+  % apply write metatdata
+  {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod2#ofp_flow_mod.instructions),
+  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, Type, MetadataWrite),
+  FlowMod3 = FlowMod2#ofp_flow_mod{
+    instructions = NewInstructions
+  },
+  % apply metadata match
+  {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod1#ofp_flow_mod.match#ofp_match.fields),
+  NewMatches = metadata_add_metadata_provider_match(OtherMatches, Type, MetadataMatch),
+  FlowMod4 = FlowMod3#ofp_flow_mod{
+    match = #ofp_match{fields = NewMatches}
+  },
+  % return refactored flow mod
   {TableId3, FlowMod4}.
 
-% remove flowmod write metadata instruction
--spec remove_flowmod_instruction_metadata([ofp_instruction()])
-      -> {[ofp_instruction()]}.
-remove_flowmod_instruction_metadata(InstructionList) ->
-  [I || I <- InstructionList, not(is_record(I, ofp_instruction_write_metadata))].
+metadata_split_write(InstructionList) ->
+  metadata_split_write(false, [], InstructionList).
+metadata_split_write(MetadataWrite, OtherInstructions, []) ->
+  {MetadataWrite, OtherInstructions};
+metadata_split_write(_MetadataWrite, OtherInstructions, [#ofp_instruction_write_metadata{} = MetadataWrite | InstructionList]) ->
+  metadata_split_write(MetadataWrite, OtherInstructions, InstructionList);
+metadata_split_write(MetadataWrite, OtherInstructions, [Instruction | InstructionList]) ->
+  metadata_split_write(MetadataWrite, OtherInstructions ++ [Instruction], InstructionList).
 
-% filter flowmod write metadata instruction
--spec filter_flowmod_instruction_metadata([ofp_instruction()])
-      -> {[ofp_instruction()]}.
-filter_flowmod_instruction_metadata(InstructionList) ->
-  [I || I <- InstructionList, is_record(I, ofp_instruction_write_metadata)].
+metadata_add_metadata_provider_apply(InstructionList, _Provider, false) ->
+  InstructionList;
+metadata_add_metadata_provider_apply(InstructionList, srcmac, MetadataWrite) ->
+  <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
+  <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = MetadataValue, has_mask = true, mask = MetadataMask}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
+metadata_add_metadata_provider_apply(InstructionList, dstmac, MetadataWrite) ->
+  <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
+  <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = MetadataValue, has_mask = true, mask = MetadataMask}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
+
+metadata_add_setfield_to_instruction(InstructionList, SetField) ->
+  metadata_add_setfield_to_instruction([], SetField, InstructionList).
+metadata_add_setfield_to_instruction(InstructionList, SetField, [#ofp_instruction_apply_actions{} = Instruction | RemainingInstructions]) ->
+  NewInstructions = InstructionList ++ [Instruction#ofp_instruction_apply_actions{actions = Instruction#ofp_instruction_apply_actions.actions ++ [SetField]}],
+  metadata_add_setfield_to_instruction(NewInstructions, false, RemainingInstructions);
+metadata_add_setfield_to_instruction(InstructionList, SetField, [Instruction | RemainingInstructions]) ->
+  NewInstructions = InstructionList ++ [Instruction],
+  metadata_add_setfield_to_instruction(NewInstructions, SetField, RemainingInstructions);
+metadata_add_setfield_to_instruction(InstructionList, false, []) ->
+  InstructionList;
+metadata_add_setfield_to_instruction(InstructionList, SetField, []) ->
+  NewInstructions = InstructionList ++ [#ofp_instruction_apply_actions{actions = [SetField]}],
+  metadata_add_setfield_to_instruction(NewInstructions, false, []).
+
+metadata_split_match(MatchFields) ->
+  metadata_split_match(false, [], MatchFields).
+metadata_split_match(MetadataMatch, OtherMatches, []) ->
+  {MetadataMatch, OtherMatches};
+metadata_split_match(_MetadataMatch, OtherMatches, [#ofp_field{name = metadata} = MetadataMatch | MatchFields]) ->
+  metadata_split_match(MetadataMatch, OtherMatches, MatchFields);
+metadata_split_match(MetadataMatch, OtherMatches, [MatchField | MatchFields]) ->
+  metadata_split_match(MetadataMatch, OtherMatches ++ [MatchField], MatchFields).
+
+metadata_add_metadata_provider_match(OtherMatches, _Provider, false) ->
+  OtherMatches;
+metadata_add_metadata_provider_match(OtherMatches, srcmac, MetadataMatch) ->
+  <<_:16, MetadataValue/binary>> = MetadataMatch#ofp_field.value,
+  <<_:16, MetadataMask/binary>> = MetadataMatch#ofp_field.mask,
+  TranslatedMatch = #ofp_field{class = openflow_basic, name = eth_src, value = MetadataValue, has_mask = MetadataMatch#ofp_field.has_mask, mask = MetadataMask},
+  OtherMatches ++ [TranslatedMatch];
+metadata_add_metadata_provider_match(OtherMatches, dstmac, MetadataMatch) ->
+  <<_:16, MetadataValue/binary>> = MetadataMatch#ofp_field.value,
+  <<_:16, MetadataMask/binary>> = MetadataMatch#ofp_field.mask,
+  TranslatedMatch = #ofp_field{class = openflow_basic, name = eth_dst, value = MetadataValue, has_mask = MetadataMatch#ofp_field.has_mask, mask = MetadataMask},
+  OtherMatches ++ [TranslatedMatch].
 
 % remove flowmod set mac address action
--spec remove_flowmod_action_set_field(_Type, [ofp_instruction()])
+-spec remove_flowmod_action_set_field(atom(), [ofp_instruction()])
       -> {[ofp_instruction()]}.
 remove_flowmod_action_set_field(srcmac, InstructionList) ->
-  ApplyInstruction = safehd([I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)]),
-  case ApplyInstruction == nil of
-    true ->
-      InstructionList;
-    false ->
-      SetFieldActionList = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_set_field)],
-      case SetFieldActionList == [] of
-        true ->
-          InstructionList;
-        false ->
-          SetFieldActionList2 = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions,
-            not(is_record(A, ofp_action_set_field)) orelse
-              (is_record(A, ofp_action_set_field) and is_record(A#ofp_action_set_field.field, ofp_field) and (A#ofp_action_set_field.field#ofp_field.name /= eth_src))],
-          InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [#ofp_instruction_apply_actions{actions = SetFieldActionList2}],
-          InstructionList2
-      end
-  end;
+  ActionFilter =
+    fun
+      (#ofp_action_set_field{field = #ofp_field{name = eth_src}}) ->
+        nil;
+      (Action) ->
+        Action
+    end,
+  InstructionFilter =
+    fun
+      (#ofp_instruction_apply_actions{} = Instruction) ->
+        Instruction#ofp_instruction_apply_actions{actions = [A || A <- [
+          ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
+        ], A /= nil]};
+      (Instruction) ->
+        Instruction
+    end,
+  [InstructionFilter(I) || I <- InstructionList];
 remove_flowmod_action_set_field(dstmac, InstructionList) ->
-  ApplyInstruction = safehd([I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)]),
-  case ApplyInstruction == nil of
-    true ->
-      InstructionList;
-    false ->
-      SetFieldActionList = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_set_field)],
-      case SetFieldActionList == [] of
-        true ->
-          InstructionList;
-        false ->
-          SetFieldActionList2 = [A || A <- ApplyInstruction#ofp_instruction_apply_actions.actions,
-            not(is_record(A, ofp_action_set_field)) orelse
-              (is_record(A, ofp_action_set_field) and is_record(A#ofp_action_set_field.field, ofp_field) and (A#ofp_action_set_field.field#ofp_field.name /= eth_dst))],
-          InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [#ofp_instruction_apply_actions{actions = SetFieldActionList2}],
-          InstructionList2
-      end
-  end.
-
-% add flowmod set dst mac address action from metadata
--spec add_flowmod_action_set_eth_from_metadata(_Type, [ofp_instruction()], term())
-      -> {[ofp_instruction()]}.
-add_flowmod_action_set_eth_from_metadata(srcmac, InstructionList, Metadata) ->
-  <<_:16, CuttedMetadata/binary>> = Metadata,
-  lager:info("InstructionList ~p", [InstructionList]),
-  NewSetEthDstAction = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = CuttedMetadata}},
-  ApplyInstructionList = [I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)],
-  lager:info("ApplyInstructionList ~p", [ApplyInstructionList]),
-  case ApplyInstructionList == [] of
-    true ->
-      ApplyInstruction = #ofp_instruction_apply_actions{actions = []};
-    false ->
-      [ApplyInstruction | _] = ApplyInstructionList
-  end,
-  InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [ApplyInstruction#ofp_instruction_apply_actions{actions = ApplyInstruction#ofp_instruction_apply_actions.actions ++ [NewSetEthDstAction]}],
-  InstructionList2;
-add_flowmod_action_set_eth_from_metadata(dstmac, InstructionList, Metadata) ->
-  <<_:16, CuttedMetadata/binary>> = Metadata,
-  lager:info("InstructionList ~p", [InstructionList]),
-  NewSetEthDstAction = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = CuttedMetadata}},
-  ApplyInstructionList = [I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)],
-  lager:info("ApplyInstructionList ~p", [ApplyInstructionList]),
-  case ApplyInstructionList == [] of
-    true ->
-      ApplyInstruction = #ofp_instruction_apply_actions{actions = []};
-    false ->
-      [ApplyInstruction | _] = ApplyInstructionList
-  end,
-  InstructionList2 = [I || I <- InstructionList, not(is_record(I, ofp_instruction_apply_actions))] ++ [ApplyInstruction#ofp_instruction_apply_actions{actions = ApplyInstruction#ofp_instruction_apply_actions.actions ++ [NewSetEthDstAction]}],
-  InstructionList2.
-
--spec safehd([any()])
-      -> [any()].
-safehd(List) ->
-  case List == [] of
-    true ->
-      nil;
-    false ->
-      hd(List)
-  end.
+  ActionFilter =
+    fun
+      (#ofp_action_set_field{field = #ofp_field{name = eth_dst}}) ->
+        nil;
+      (Action) ->
+        Action
+    end,
+  InstructionFilter =
+    fun
+      (#ofp_instruction_apply_actions{} = Instruction) ->
+        Instruction#ofp_instruction_apply_actions{actions = [A || A <- [
+          ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
+        ], A /= nil]};
+      (Instruction) ->
+        Instruction
+    end,
+  [InstructionFilter(I) || I <- InstructionList].
 
 %% @doc Modify flow table configuration.
 -spec ofp_table_mod(state(), ofp_table_mod()) ->
@@ -795,11 +796,20 @@ tablevisor_logformat_flow_match([], Reply) ->
 tablevisor_logformat_flow_match([#ofp_field{name = in_port, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("In Port: ~p", [binary_to_int(Value)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = metadata, value = Value, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Metadata: ~s/~s", [binary_to_metadata(Value), binary_to_metadata(Mask)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
 tablevisor_logformat_flow_match([#ofp_field{name = eth_type, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("EtherType: 0x~4.16.0B", [binary_to_int(Value)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = eth_src, value = Value, has_mask = true, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Src. MAC: ~s/~s", [binary_to_mac(Value), binary_to_mac(Mask)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
 tablevisor_logformat_flow_match([#ofp_field{name = eth_src, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Src. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = eth_dst, value = Value, has_mask = true, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Dst. MAC: ~s/~s", [binary_to_mac(Value), binary_to_mac(Mask)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
 tablevisor_logformat_flow_match([#ofp_field{name = eth_dst, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Dst. MAC: ~s", [binary_to_mac(Value)])],
@@ -848,8 +858,14 @@ tablevisor_logformat_flow_action([#ofp_action_output{port = Port} | Actions], Re
 tablevisor_logformat_flow_action([#ofp_action_pop_mpls{ethertype = EthType} | Actions], Reply) ->
   Reply2 = Reply ++ [io_lib:format("POP MPLS: 0x~4.16.0B", [EthType])],
   tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value, has_mask = true, mask = Mask}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set Src. MAC: ~s/~s", [binary_to_mac(Value), binary_to_mac(Mask)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value}} | Actions], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Set Src. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value, has_mask = true, mask = Mask}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set Dst. MAC: ~s/~s", [binary_to_mac(Value), binary_to_mac(Mask)])],
   tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value}} | Actions], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Set Dst. MAC: ~s", [binary_to_mac(Value)])],
