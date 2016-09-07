@@ -30,7 +30,8 @@
   tablevisor_wait_for_switches/0,
   tablevisor_topology_discovery/0,
   tablevisor_multi_request/1,
-  tablevisor_multi_request/2
+  tablevisor_multi_request/2,
+  tablevisor_identify_table_position/0
 ]).
 
 
@@ -537,6 +538,17 @@ tablevisor_digraph_get_edge(Graph, V1, V2, [Edge | EdgeList]) ->
   end;
 tablevisor_digraph_get_edge(_Graph, _V1, _V2, []) ->
   false.
+
+%%%-----------------------------------------------------------------------------
+%%% TableVisor Switch/Table Position Identification
+%%%-----------------------------------------------------------------------------
+
+tablevisor_identify_table_position() ->
+  Tables = lists:sort(tablevisor_tables()),
+  [FirstTableId | _] = Tables,
+  [LastTableId | _] = lists:reverse(Tables),
+  tablevisor_switch_set(FirstTableId, position, first),
+  tablevisor_switch_set(LastTableId, position, last).
 
 %%%-----------------------------------------------------------------------------
 %%% TableVisor Sender and Receiver Functions
