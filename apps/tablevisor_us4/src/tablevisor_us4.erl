@@ -351,25 +351,56 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
 
-apply_metadata_provider(Type, {TableId3, FlowMod1}) ->
+apply_metadata_provider(Type, {TableId, FlowMod1}) ->
   % remove set eth field
   FlowMod2 = FlowMod1#ofp_flow_mod{
-    instructions = remove_flowmod_action_set_field(Type, FlowMod1#ofp_flow_mod.instructions)
+    instructions = metadata_remove_instruction_setfield(Type, FlowMod1#ofp_flow_mod.instructions)
   },
+  % set position specific flow mods
+  Position = tablevisor_ctrl4:tablevisor_switch_get(TableId, position),
+  FlowMod3 = metatdata_apply_tableposition_action(Type, Position, FlowMod2),
   % apply write metatdata
-  {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod2#ofp_flow_mod.instructions),
+  {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod3#ofp_flow_mod.instructions),
   NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, Type, MetadataWrite),
-  FlowMod3 = FlowMod2#ofp_flow_mod{
+  FlowMod4 = FlowMod3#ofp_flow_mod{
     instructions = NewInstructions
   },
   % apply metadata match
-  {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod1#ofp_flow_mod.match#ofp_match.fields),
+  {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod4#ofp_flow_mod.match#ofp_match.fields),
   NewMatches = metadata_add_metadata_provider_match(OtherMatches, Type, MetadataMatch),
-  FlowMod4 = FlowMod3#ofp_flow_mod{
+  FlowMod5 = FlowMod4#ofp_flow_mod{
     match = #ofp_match{fields = NewMatches}
   },
   % return refactored flow mod
-  {TableId3, FlowMod4}.
+  {TableId, FlowMod5}.
+
+metatdata_apply_tableposition_action(Provider, Position, FlowMod) ->
+  case Position of
+    first ->
+      FlowMod#ofp_flow_mod{
+        instructions = metadata_init_action(Provider, FlowMod#ofp_flow_mod.instructions)
+      };
+    last ->
+      FlowMod#ofp_flow_mod{
+        instructions = metadata_concluding_action(Provider, FlowMod#ofp_flow_mod.instructions)
+      };
+    _ ->
+      FlowMod
+  end.
+
+metadata_init_action(srcmac, InstructionList) ->
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
+metadata_init_action(dstmac, InstructionList) ->
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
+
+metadata_concluding_action(srcmac, InstructionList) ->
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
+metadata_concluding_action(dstmac, InstructionList) ->
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
+  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
 
 metadata_split_write(InstructionList) ->
   metadata_split_write(false, [], InstructionList).
@@ -383,15 +414,17 @@ metadata_split_write(MetadataWrite, OtherInstructions, [Instruction | Instructio
 metadata_add_metadata_provider_apply(InstructionList, _Provider, false) ->
   InstructionList;
 metadata_add_metadata_provider_apply(InstructionList, srcmac, MetadataWrite) ->
+  InstructionList2 = remove_instruction_setfield(InstructionList, eth_src),
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
   <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = MetadataValue, has_mask = true, mask = MetadataMask}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
+  metadata_add_setfield_to_instruction(InstructionList2, NewSetField);
 metadata_add_metadata_provider_apply(InstructionList, dstmac, MetadataWrite) ->
+  InstructionList2 = remove_instruction_setfield(InstructionList, eth_dst),
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
   <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = MetadataValue, has_mask = true, mask = MetadataMask}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
+  metadata_add_setfield_to_instruction(InstructionList2, NewSetField).
 
 metadata_add_setfield_to_instruction(InstructionList, SetField) ->
   metadata_add_setfield_to_instruction([], SetField, InstructionList).
@@ -429,45 +462,38 @@ metadata_add_metadata_provider_match(OtherMatches, dstmac, MetadataMatch) ->
   TranslatedMatch = #ofp_field{class = openflow_basic, name = eth_dst, value = MetadataValue, has_mask = MetadataMatch#ofp_field.has_mask, mask = MetadataMask},
   OtherMatches ++ [TranslatedMatch].
 
-% remove flowmod set mac address action
--spec remove_flowmod_action_set_field(atom(), [ofp_instruction()])
-      -> {[ofp_instruction()]}.
-remove_flowmod_action_set_field(srcmac, InstructionList) ->
+remove_instruction_setfield(InstructionList, FieldName) ->
   ActionFilter =
-    fun
-      (#ofp_action_set_field{field = #ofp_field{name = eth_src}}) ->
-        nil;
-      (Action) ->
-        Action
+    fun(Field) ->
+      case Field of
+        #ofp_action_set_field{field = #ofp_field{name = FieldName}} ->
+          nil;
+        _ ->
+          Field
+      end
     end,
   InstructionFilter =
     fun
       (#ofp_instruction_apply_actions{} = Instruction) ->
-        Instruction#ofp_instruction_apply_actions{actions = [A || A <- [
-          ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
-        ], A /= nil]};
-      (Instruction) ->
-        Instruction
-    end,
-  [InstructionFilter(I) || I <- InstructionList];
-remove_flowmod_action_set_field(dstmac, InstructionList) ->
-  ActionFilter =
-    fun
-      (#ofp_action_set_field{field = #ofp_field{name = eth_dst}}) ->
-        nil;
-      (Action) ->
-        Action
-    end,
-  InstructionFilter =
-    fun
-      (#ofp_instruction_apply_actions{} = Instruction) ->
-        Instruction#ofp_instruction_apply_actions{actions = [A || A <- [
-          ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
-        ], A /= nil]};
+        Instruction#ofp_instruction_apply_actions{
+          actions = [
+            A || A <- [
+              ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
+            ], A /= nil
+          ]
+        };
       (Instruction) ->
         Instruction
     end,
   [InstructionFilter(I) || I <- InstructionList].
+
+% remove flowmod set mac address action
+-spec metadata_remove_instruction_setfield(atom(), [ofp_instruction()])
+      -> {[ofp_instruction()]}.
+metadata_remove_instruction_setfield(srcmac, InstructionList) ->
+  remove_instruction_setfield(InstructionList, eth_src);
+metadata_remove_instruction_setfield(dstmac, InstructionList) ->
+  remove_instruction_setfield(InstructionList, eth_dst).
 
 %% @doc Modify flow table configuration.
 -spec ofp_table_mod(state(), ofp_table_mod()) ->
