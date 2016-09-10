@@ -512,6 +512,7 @@ tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, [DstTable
   case Edge of
     {_E, V1, V2, {P1, P2}} ->
       lager:info("Discovered Connection:  [ Switch ~p ]--(~p)--------(~p)--[ Switch ~p ]", [V1, P1, P2, V2]),
+      tablevisor_us4:tablevisor_log("~sDiscovered Connection:  [ ~sSwitch ~p~s ]--(~p)--------(~p)--[ ~sSwitch ~p~s ]", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), V1, tablevisor_us4:tvlc(green), P1, P2, tablevisor_us4:tvlc(green, b), V2, tablevisor_us4:tvlc(green)]),
       OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
       OutportMap2 = OutportMap ++ [{V2, P1}],
       tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);

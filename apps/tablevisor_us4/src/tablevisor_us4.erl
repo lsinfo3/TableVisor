@@ -185,6 +185,9 @@ tablevisor_read_config(_SwitchId, Config) ->
     {metadata_provider, dstmac} ->
       ets:insert(tablevisor_config, {metadata_provider, dstmac}),
       lager:info("Set metadata provider: Destination MAC address.");
+    {metadata_provider, vid} ->
+      ets:insert(tablevisor_config, {metadata_provider, vid}),
+      lager:info("Set metadata provider: VLAN-ID.");
     false ->
       false
   end.
@@ -338,6 +341,8 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
       Requests2 = [apply_metadata_provider(srcmac, Request) || Request <- Requests];
     dstmac ->
       Requests2 = [apply_metadata_provider(dstmac, Request) || Request <- Requests];
+    vid ->
+      Requests2 = [apply_metadata_provider(vid, Request) || Request <- Requests];
     _ ->
       Requests2 = Requests
   end,
@@ -351,23 +356,23 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
 
-apply_metadata_provider(Type, {TableId, FlowMod1}) ->
-  % remove set eth field
+apply_metadata_provider(Provider, {TableId, FlowMod1}) ->
+  % remove set field
   FlowMod2 = FlowMod1#ofp_flow_mod{
-    instructions = metadata_remove_instruction_setfield(Type, FlowMod1#ofp_flow_mod.instructions)
+    instructions = metadata_remove_instruction_setfield(Provider, FlowMod1#ofp_flow_mod.instructions)
   },
   % set position specific flow mods
   Position = tablevisor_ctrl4:tablevisor_switch_get(TableId, position),
-  FlowMod3 = metatdata_apply_tableposition_action(Type, Position, FlowMod2),
+  FlowMod3 = metatdata_apply_tableposition_action(Provider, Position, FlowMod2),
   % apply write metatdata
   {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod3#ofp_flow_mod.instructions),
-  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, Type, MetadataWrite),
+  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, Provider, MetadataWrite),
   FlowMod4 = FlowMod3#ofp_flow_mod{
     instructions = NewInstructions
   },
   % apply metadata match
   {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod4#ofp_flow_mod.match#ofp_match.fields),
-  NewMatches = metadata_add_metadata_provider_match(OtherMatches, Type, MetadataMatch),
+  NewMatches = metadata_add_metadata_provider_match(OtherMatches, Provider, MetadataMatch),
   FlowMod5 = FlowMod4#ofp_flow_mod{
     match = #ofp_match{fields = NewMatches}
   },
@@ -377,30 +382,59 @@ apply_metadata_provider(Type, {TableId, FlowMod1}) ->
 metatdata_apply_tableposition_action(Provider, Position, FlowMod) ->
   case Position of
     first ->
-      FlowMod#ofp_flow_mod{
-        instructions = metadata_init_action(Provider, FlowMod#ofp_flow_mod.instructions)
-      };
+      metadata_init_action(Provider, FlowMod);
     last ->
-      FlowMod#ofp_flow_mod{
-        instructions = metadata_concluding_action(Provider, FlowMod#ofp_flow_mod.instructions)
-      };
+      metadata_concluding_action(Provider, FlowMod);
     _ ->
       FlowMod
   end.
 
-metadata_init_action(srcmac, InstructionList) ->
+metadata_init_action(srcmac, FlowMod) ->
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
-metadata_init_action(dstmac, InstructionList) ->
+  NewInstructions = metadata_add_action_to_instruction(FlowMod#ofp_flow_mod.instructions, NewSetField),
+  FlowMod#ofp_flow_mod{
+    instructions = NewInstructions
+  };
+metadata_init_action(dstmac, FlowMod) ->
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
+  NewInstructions = metadata_add_action_to_instruction(FlowMod#ofp_flow_mod.instructions, NewSetField),
+  FlowMod#ofp_flow_mod{
+    instructions = NewInstructions
+  };
+metadata_init_action(vid, FlowMod) ->
+  InstructionList = FlowMod#ofp_flow_mod.instructions,
+  % push vlan tag
+  PushVlanTagAction = #ofp_action_push_vlan{ethertype = 16#8100},
+  InstructionList1 = metadata_add_action_to_instruction(InstructionList, PushVlanTagAction),
+  % set vlan id to 0
+  SetVlanIdAction = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<128, 0:5>>}},
+  InstructionList2 = metadata_add_action_to_instruction(InstructionList1, SetVlanIdAction),
+  FlowMod#ofp_flow_mod{
+    instructions = InstructionList2
+  }.
 
-metadata_concluding_action(srcmac, InstructionList) ->
+metadata_concluding_action(srcmac, FlowMod) ->
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField);
-metadata_concluding_action(dstmac, InstructionList) ->
+  NewInstructions = metadata_add_action_to_instruction(FlowMod#ofp_flow_mod.instructions, NewSetField),
+  FlowMod#ofp_flow_mod{
+    instructions = NewInstructions
+  };
+metadata_concluding_action(dstmac, FlowMod) ->
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
-  metadata_add_setfield_to_instruction(InstructionList, NewSetField).
+  NewInstructions = metadata_add_action_to_instruction(FlowMod#ofp_flow_mod.instructions, NewSetField),
+  FlowMod#ofp_flow_mod{
+    instructions = NewInstructions
+  };
+metadata_concluding_action(vid, FlowMod) ->
+  PopVlanTagAction = #ofp_action_pop_vlan{},
+  NewInstructions = metadata_add_action_to_instruction(FlowMod#ofp_flow_mod.instructions, PopVlanTagAction),
+  OtherMatches = FlowMod#ofp_flow_mod.match#ofp_match.fields,
+  EthertypeMatch = #ofp_field{class = openflow_basic, name = eth_type, value = <<129, 0>>},
+  VidMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<128, 0:5>>, has_mask = true, mask = <<128, 0:5>>},
+  FlowMod#ofp_flow_mod{
+    match = #ofp_match{fields = OtherMatches ++ ([EthertypeMatch] ++ [VidMatch])},
+    instructions = NewInstructions
+  }.
 
 metadata_split_write(InstructionList) ->
   metadata_split_write(false, [], InstructionList).
@@ -418,27 +452,33 @@ metadata_add_metadata_provider_apply(InstructionList, srcmac, MetadataWrite) ->
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
   <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = MetadataValue, has_mask = true, mask = MetadataMask}},
-  metadata_add_setfield_to_instruction(InstructionList2, NewSetField);
+  metadata_add_action_to_instruction(InstructionList2, NewSetField);
 metadata_add_metadata_provider_apply(InstructionList, dstmac, MetadataWrite) ->
   InstructionList2 = remove_instruction_setfield(InstructionList, eth_dst),
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
   <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = MetadataValue, has_mask = true, mask = MetadataMask}},
-  metadata_add_setfield_to_instruction(InstructionList2, NewSetField).
+  metadata_add_action_to_instruction(InstructionList2, NewSetField);
+metadata_add_metadata_provider_apply(InstructionList, vid, MetadataWrite) ->
+  InstructionList2 = remove_instruction_setfield(InstructionList, vlan_vid),
+  <<_:52, MetadataValue:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
+  <<_:52, MetadataMask:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = true, mask = <<(MetadataMask + 16#1000):13>>}},
+  metadata_add_action_to_instruction(InstructionList2, NewSetField).
 
-metadata_add_setfield_to_instruction(InstructionList, SetField) ->
-  metadata_add_setfield_to_instruction([], SetField, InstructionList).
-metadata_add_setfield_to_instruction(InstructionList, SetField, [#ofp_instruction_apply_actions{} = Instruction | RemainingInstructions]) ->
-  NewInstructions = InstructionList ++ [Instruction#ofp_instruction_apply_actions{actions = Instruction#ofp_instruction_apply_actions.actions ++ [SetField]}],
-  metadata_add_setfield_to_instruction(NewInstructions, false, RemainingInstructions);
-metadata_add_setfield_to_instruction(InstructionList, SetField, [Instruction | RemainingInstructions]) ->
+metadata_add_action_to_instruction(InstructionList, NewAction) ->
+  metadata_add_action_to_instruction([], NewAction, InstructionList).
+metadata_add_action_to_instruction(InstructionList, NewAction, [#ofp_instruction_apply_actions{} = Instruction | RemainingInstructions]) ->
+  NewInstructions = InstructionList ++ [Instruction#ofp_instruction_apply_actions{actions = Instruction#ofp_instruction_apply_actions.actions ++ [NewAction]}],
+  metadata_add_action_to_instruction(NewInstructions, false, RemainingInstructions);
+metadata_add_action_to_instruction(InstructionList, NewAction, [Instruction | RemainingInstructions]) ->
   NewInstructions = InstructionList ++ [Instruction],
-  metadata_add_setfield_to_instruction(NewInstructions, SetField, RemainingInstructions);
-metadata_add_setfield_to_instruction(InstructionList, false, []) ->
+  metadata_add_action_to_instruction(NewInstructions, NewAction, RemainingInstructions);
+metadata_add_action_to_instruction(InstructionList, false, []) ->
   InstructionList;
-metadata_add_setfield_to_instruction(InstructionList, SetField, []) ->
-  NewInstructions = InstructionList ++ [#ofp_instruction_apply_actions{actions = [SetField]}],
-  metadata_add_setfield_to_instruction(NewInstructions, false, []).
+metadata_add_action_to_instruction(InstructionList, NewAction, []) ->
+  NewInstructions = InstructionList ++ [#ofp_instruction_apply_actions{actions = [NewAction]}],
+  metadata_add_action_to_instruction(NewInstructions, false, []).
 
 metadata_split_match(MatchFields) ->
   metadata_split_match(false, [], MatchFields).
@@ -460,7 +500,15 @@ metadata_add_metadata_provider_match(OtherMatches, dstmac, MetadataMatch) ->
   <<_:16, MetadataValue/binary>> = MetadataMatch#ofp_field.value,
   <<_:16, MetadataMask/binary>> = MetadataMatch#ofp_field.mask,
   TranslatedMatch = #ofp_field{class = openflow_basic, name = eth_dst, value = MetadataValue, has_mask = MetadataMatch#ofp_field.has_mask, mask = MetadataMask},
-  OtherMatches ++ [TranslatedMatch].
+  OtherMatches ++ [TranslatedMatch];
+metadata_add_metadata_provider_match(OtherMatches1, vid, MetadataMatch) ->
+  % filter previous vid match from concluding table
+  OtherMatches2 = [Match || Match <- OtherMatches1, Match#ofp_field.name /= vlan_vid],
+  % create vid match
+  <<_:52, MetadataValue:12>> = MetadataMatch#ofp_field.value,
+  <<_:52, MetadataMask:12>> = MetadataMatch#ofp_field.mask,
+  TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = MetadataMatch#ofp_field.has_mask, mask = <<(MetadataMask + 16#1000):13>>},
+  OtherMatches2 ++ [TranslatedMatch].
 
 remove_instruction_setfield(InstructionList, FieldName) ->
   ActionFilter =
@@ -487,13 +535,42 @@ remove_instruction_setfield(InstructionList, FieldName) ->
     end,
   [InstructionFilter(I) || I <- InstructionList].
 
+remove_instruction_pushvlan(InstructionList) ->
+  ActionFilter =
+    fun(Field) ->
+      case Field of
+        #ofp_action_push_vlan{} ->
+          nil;
+        _ ->
+          Field
+      end
+    end,
+  InstructionFilter =
+    fun
+      (#ofp_instruction_apply_actions{} = Instruction) ->
+        Instruction#ofp_instruction_apply_actions{
+          actions = [
+            A || A <- [
+              ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
+            ], A /= nil
+          ]
+        };
+      (Instruction) ->
+        Instruction
+    end,
+  [InstructionFilter(I) || I <- InstructionList].
+
 % remove flowmod set mac address action
 -spec metadata_remove_instruction_setfield(atom(), [ofp_instruction()])
       -> {[ofp_instruction()]}.
 metadata_remove_instruction_setfield(srcmac, InstructionList) ->
   remove_instruction_setfield(InstructionList, eth_src);
 metadata_remove_instruction_setfield(dstmac, InstructionList) ->
-  remove_instruction_setfield(InstructionList, eth_dst).
+  remove_instruction_setfield(InstructionList, eth_dst);
+metadata_remove_instruction_setfield(vid, InstructionList) ->
+  remove_instruction_pushvlan(
+    remove_instruction_setfield(InstructionList, vlan_vid)
+  ).
 
 %% @doc Modify flow table configuration.
 -spec ofp_table_mod(state(), ofp_table_mod()) ->
@@ -848,6 +925,12 @@ tablevisor_logformat_flow_match([#ofp_field{name = ipv4_src, value = Value, mask
 tablevisor_logformat_flow_match([#ofp_field{name = ipv4_dst, value = Value, mask = Mask} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Dst. IP: ~s/~p", [binary_to_ipv4(Value), binary_to_ipv4_prefixlength(Mask)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = vlan_vid, value = Value, has_mask = true, mask = Mask} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("VLAN Id: ~s/~s", [binary_to_vlan_vid(Value), binary_to_vlan_vid(Mask)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = vlan_vid, value = Value} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("VLAN Id: ~s", [binary_to_vlan_vid(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
 tablevisor_logformat_flow_match([#ofp_field{name = mpls_label, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("MPLS Label: ~s", [binary_to_mpls_label(Value)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
@@ -884,7 +967,13 @@ tablevisor_logformat_flow_action([#ofp_action_output{port = Port} | Actions], Re
   Reply2 = Reply ++ [io_lib:format("Output: ~p", [Port])],
   tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([#ofp_action_pop_mpls{ethertype = EthType} | Actions], Reply) ->
-  Reply2 = Reply ++ [io_lib:format("POP MPLS: 0x~4.16.0B", [EthType])],
+  Reply2 = Reply ++ [io_lib:format("Pop MPLS: 0x~4.16.0B", [EthType])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_push_vlan{ethertype = EthType} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Push VLAN: 0x~4.16.0B", [EthType])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_pop_vlan{} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Pop VLAN", [])],
   tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_src, value = Value, has_mask = true, mask = Mask}} | Actions], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Set Src. MAC: ~s/~s", [binary_to_mac(Value), binary_to_mac(Mask)])],
@@ -897,6 +986,12 @@ tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name 
   tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = eth_dst, value = Value}} | Actions], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Set Dst. MAC: ~s", [binary_to_mac(Value)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = Value, has_mask = true, mask = Mask}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set VLAN-Id: ~s/~s", [binary_to_vlan_vid(Value), binary_to_vlan_vid(Mask)])],
+  tablevisor_logformat_flow_action(Actions, Reply2);
+tablevisor_logformat_flow_action([#ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = Value}} | Actions], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Set VLAN-Id: ~s", [binary_to_vlan_vid(Value)])],
   tablevisor_logformat_flow_action(Actions, Reply2);
 tablevisor_logformat_flow_action([_Action | Actions], Reply) ->
   tablevisor_logformat_flow_action(Actions, Reply).
@@ -923,6 +1018,10 @@ binary_to_metadata(Bin) ->
 binary_to_ipv4(Bin) ->
   <<A:8, B:8, C:8, D:8>> = Bin,
   io_lib:format("~.10B.~.10B.~.10B.~.10B", [A, B, C, D]).
+
+binary_to_vlan_vid(Bin) ->
+  <<A, B:5>> = Bin,
+  io_lib:format("~w", [(A * 32 + B) - 16#1000]).
 
 binary_to_mpls_label(Bin) ->
   <<A, B, C:4>> = Bin,
