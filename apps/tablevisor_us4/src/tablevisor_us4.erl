@@ -200,6 +200,10 @@ tablevisor_create_switch_config(Switch) ->
               {tableid, TableId2} -> TableId2;
               _ -> 0
             end,
+  PriorityList = case lists:keyfind(priority, 1, SwitchConfig) of
+                   {priority, {P1, P2}} -> lists:seq(P1, P2);
+                   _ -> lists:seq(0, 255)
+                 end,
   OutportMap = tablevisor_config_read_outportmap(SwitchConfig),
 % read back line mapping for connections from last table to switch 0
   case lists:keyfind(flowmods, 1, SwitchConfig) of
@@ -216,6 +220,7 @@ tablevisor_create_switch_config(Switch) ->
     {socket, false},
     {pid, false},
     {processtable, ProcessTable},
+    {priority, PriorityList},
     {flowmods, FlowMods},
     {position, intermediate}
   ],
@@ -273,28 +278,16 @@ ofp_features_request(#state{switch_id = SwitchId,
     capabilities = ?CAPABILITIES},
   {reply, FeaturesReply, State}.
 
-generate_hash_from_match(Matches) ->
-  IntHash = erlang:crc32(term_to_binary(Matches)),
-  MaxHash = 16#ffffffff,
-  IntHash / MaxHash.
-
-get_tableno_from_match(Matches, SwitchCount) ->
-  Hash = generate_hash_from_match(Matches),
-  WeightedHash = Hash * SwitchCount,
-  trunc(WeightedHash).
-
 %% @doc Modify flow entry in the flow table.
 -spec ofp_flow_mod(state(), ofp_flow_mod()) ->
   {noreply, #state{}} |
   {reply, ofp_message(), #state{}}.
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
   LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
-  Matches = FlowMod#ofp_flow_mod.match#ofp_match.fields,
-  lager:warning("TableNo ~p", [get_tableno_from_match(Matches, 1)]),
   tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
   lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
-  SwitchIdList = [tablevisor_ctrl4:tablevisor_switch_get({tableid, TableId}, switchid)],
+  SwitchIdList = [ofp_flow_mod_get_switch_id(FlowMod)],
   % anonymous function to generate flow mod
   RefactorFlowMod = fun(SwitchId, FlowMod2) ->
     % extract apply-action-instructions from all instructions
@@ -364,6 +357,35 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % send requests and receives replies
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
+
+-spec ofp_flow_mod_get_switch_id(ofp_flow_mod()) ->
+  integer().
+ofp_flow_mod_get_switch_id(#ofp_flow_mod{table_id = TableId, match = Matches, priority = Priority} = _FlowMod) ->
+  Switches1 = tablevisor_ctrl4:tablevisor_switchid_list(),
+  % filter switches by table id
+  Switches2 = lists:filter(
+    fun(SwitchId) ->
+      case tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, tableid) of
+        TableId -> true;
+        _ -> false
+      end
+    end, Switches1),
+  % filter switches by flow mod priority
+  Switches3 = lists:filter(
+    fun(SwitchId) ->
+      PriorityList = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, priority),
+      lists:member(Priority, PriorityList)
+    end, Switches2),
+  % generate hash from match
+  %Matches = FlowMod#ofp_flow_mod.match#ofp_match.fields
+  IntHash = erlang:crc32(term_to_binary(Matches)),
+  MaxHash = 16#ffffffff,
+  Hash = IntHash / MaxHash,
+  % calculate switch number from hash
+  WeightedHash = Hash * length(Switches3),
+  SwitchNo = trunc(WeightedHash) + 1,
+  lager:debug("SwitchList ~p, WeighedHash ~p, SwitchNo ~p", [Switches3, WeightedHash, SwitchNo]),
+  lists:nth(SwitchNo, Switches3).
 
 apply_metadata_provider(Provider, {SwitchId, FlowMod1}) ->
   % remove set field
