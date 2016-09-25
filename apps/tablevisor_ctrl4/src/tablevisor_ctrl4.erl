@@ -23,6 +23,7 @@
   send/3,
   message/1,
   tablevisor_switches/0,
+  tablevisor_switchid_list/0,
   tablevisor_tables/0,
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
@@ -81,7 +82,7 @@ handle_socket(Socket, Waiters, BufferedData) ->
         {ok, _, _} ->
           true;
         {error, Exception} ->
-          lager:error("Error while parsing ~p because ~p", [DataParsing, Exception]),
+          lager:debug("Error while parsing ~p because ~p", [DataParsing, Exception]),
           handle_socket(Socket, Waiters, <<>>)
       end,
       {ok, _NewParser, Messages} = Parsed,
@@ -138,11 +139,11 @@ send_features_request(Socket, Pid) ->
       DataPathId = binary_to_int(DataPathMac),
       tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p (dpid ~.16B)", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket, DataPathId]),
       %lager:info("DataPathId ~p", [DataPathId]),
-      {ok, TableId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
-      lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Table-Id ~p", [DataPathId, Socket, Pid, TableId]),
-      tablevisor_us4:tablevisor_log("~sRegistered switch with dpid ~.16B representing table ~s~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), TableId]),
+      {ok, SwitchId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
+      lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Switch-Id ~p", [DataPathId, Socket, Pid, SwitchId]),
+      tablevisor_us4:tablevisor_log("~sRegistered switch with dpid ~.16B representing table ~s~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), SwitchId]),
       % set flow mod to enable process table different 0
-      tablevisor_us4:tablevisor_init_connection(TableId),
+      tablevisor_us4:tablevisor_init_connection(SwitchId),
       true
   after 2000 ->
     lager:error("Error while waiting for features reply from ~p, xid ~p", [Socket, Xid]),
@@ -169,11 +170,11 @@ handle_input(Socket, Message) ->
       lager:debug("Received features reply message from ~p: ~p", [Socket, Message]);
     #ofp_message{body = #ofp_packet_in{}} ->
       lager:debug("Received packet in from ~p: ~p", [Socket, Message]),
-      case tablevisor_switch_get(Socket, tableid) of
+      case tablevisor_switch_get({socket, Socket}, switchid) of
         false ->
           false;
-        TableId ->
-          tablevisor_us4:ofp_packet_in(TableId, Message)
+        SwitchId ->
+          tablevisor_us4:ofp_packet_in(SwitchId, Message)
       end;
     #ofp_message{} ->
       lager:debug("Received message from ~p: ~p", [Socket, Message])
@@ -231,45 +232,67 @@ tablevisor_switch_remove(_Socket) ->
   true.
 
 tablevisor_switch_connect(DataPathId, Socket, Pid) ->
-  SwitchList = tablevisor_switches(),
+  SwitchConfig = tablevisor_switches(),
   SearchByDpId =
-    fun(TableId, Config) ->
+    fun(SwitchId, Config) ->
       {dpid, DpId} = lists:keyfind(dpid, 1, Config),
       case DpId of
         DataPathId ->
-          tablevisor_switch_set(TableId, socket, Socket),
-          tablevisor_switch_set(TableId, pid, Pid),
-          ets:insert(tablevisor_socket, {Socket, TableId});
+          tablevisor_switch_set(SwitchId, socket, Socket),
+          tablevisor_switch_set(SwitchId, pid, Pid),
+          ets:insert(tablevisor_socket, {Socket, SwitchId});
         _ ->
           false
       end
     end,
-  [SearchByDpId(TableId, Config) || {TableId, Config} <- SwitchList],
-  TableId2 = tablevisor_switch_get(Socket, tableid),
-  {ok, TableId2}.
+  [SearchByDpId(SwitchId, Config) || {SwitchId, Config} <- SwitchConfig],
+  SwitchId = tablevisor_switch_get({socket, Socket}, switchid),
+  {ok, SwitchId}.
 
-tablevisor_switch_get(TableId, Key) when is_integer(TableId) ->
+tablevisor_switch_get({switchid, SwitchId}, switchid) ->
+  SwitchId;
+tablevisor_switch_get({tableid, TableId}, Key) ->
+  Switches = tablevisor_switches(),
+  TableFilter =
+    fun({SwitchId, Config}, TableId2) ->
+      case lists:keyfind(tableid, 1, Config) of
+        {tableid, TableId2} -> SwitchId;
+        _ -> false
+      end
+    end,
+  SwitchList = [
+    Sid || Sid <- [TableFilter(Switch, TableId) || Switch <- Switches],
+    Sid =/= false
+  ],
+  case SwitchList of
+    [] ->
+      false;
+    _ ->
+      SwitchId = lists:nth(1, SwitchList),
+      tablevisor_switch_get({switchid, SwitchId}, Key)
+  end;
+tablevisor_switch_get({switchid, SwitchId}, Key) ->
   try
-    Config = ets:lookup_element(tablevisor_switch, TableId, 2),
-    % lager:error("Key ~p, Config ~p",[Key, Config]),
+    Config = ets:lookup_element(tablevisor_switch, SwitchId, 2),
+    % lager:warning("Key ~p, Config ~p", [Key, Config]),
     {Key, Value} = lists:keyfind(Key, 1, Config),
     Value
   catch
     error:badarg ->
-      lager:error("No Switch with TableId ~p registered", [TableId]),
+      lager:error("No Switch with SwitchId ~p registered", [SwitchId]),
       false
   end;
-tablevisor_switch_get(Socket, Key) ->
+tablevisor_switch_get({socket, Socket}, Key) ->
   try
-    TableId = ets:lookup_element(tablevisor_socket, Socket, 2),
-    tablevisor_switch_get(TableId, Key)
+    SwitchId = ets:lookup_element(tablevisor_socket, Socket, 2),
+    tablevisor_switch_get({switchid, SwitchId}, Key)
   catch
     error:badarg ->
       lager:error("No Switch with Socket ~p registered", [Socket]),
       false
   end.
 
-tablevisor_switch_set(TableId, Key, NewValue) ->
+tablevisor_switch_set(SwitchId, Key, NewValue) ->
   try
     ReplaceConfig =
       fun(OldKey, OldValue) ->
@@ -280,12 +303,12 @@ tablevisor_switch_set(TableId, Key, NewValue) ->
             {OldKey, OldValue}
         end
       end,
-    Config = ets:lookup_element(tablevisor_switch, TableId, 2),
+    Config = ets:lookup_element(tablevisor_switch, SwitchId, 2),
     NewConfig = [ReplaceConfig(Key2, Value2) || {Key2, Value2} <- Config],
-    ets:insert(tablevisor_switch, {TableId, NewConfig})
+    ets:insert(tablevisor_switch, {SwitchId, NewConfig})
   catch
     error:badarg ->
-      lager:error("Error in tablevisor_switch_set", [TableId]),
+      lager:error("Error in tablevisor_switch_set", [SwitchId]),
       false
   end.
 
@@ -293,45 +316,50 @@ tablevisor_switch_set(TableId, Key, NewValue) ->
 tablevisor_switches() ->
   ets:tab2list(tablevisor_switch).
 
+tablevisor_switchid_list() ->
+  Switches = tablevisor_switches(),
+  [SwitchId || {SwitchId, _} <- Switches].
+
 -spec tablevisor_tables() -> true.
 tablevisor_tables() ->
   Switches = tablevisor_switches(),
   [TableId || {TableId, _} <- Switches].
 
-tablevisor_switch_get_outport(SrcTableId, DstTableId) ->
-  OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
-  Result = lists:keyfind(DstTableId, 1, OutportMap),
+tablevisor_switch_get_outport(SrcSwitchId, DstTableId) ->
+  DstSwitchId = tablevisor_switch_get({tableid, DstTableId}, switchid),
+  OutportMap = tablevisor_switch_get({switchid, SrcSwitchId}, outportmap),
+  Result = lists:keyfind(DstSwitchId, 1, OutportMap),
   case Result of
-    {DstTableId, Outport} ->
+    {DstSwitchId, Outport} ->
       Outport;
     false ->
       false
   end.
 
-tablevisor_switch_get_gototable(SrcTableId, OutPort) ->
-  OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
-  DstTables = [D || {D, OutPort2} <- OutportMap, OutPort2 == OutPort],
-  case DstTables == [] of
+tablevisor_switch_get_gototable(SrcSwitchId, OutPort) ->
+  OutportMap = tablevisor_switch_get({switchid, SrcSwitchId}, outportmap),
+  DstSwitches = [D || {D, OutPort2} <- OutportMap, OutPort2 == OutPort],
+  case DstSwitches == [] of
     true ->
       false;
     false ->
-      [DstTableId | _] = DstTables,
-      DstTableId
+      [DstSwitchId | _] = DstSwitches,
+      tablevisor_switch_get({switchid, DstSwitchId}, tableid)
   end.
 
 tablevisor_wait_for_switches() ->
-  Switches = tablevisor_tables(),
+  Switches = tablevisor_switchid_list(),
   tablevisor_wait_for_switches(Switches).
-tablevisor_wait_for_switches([TableId | Tables]) ->
+tablevisor_wait_for_switches([SwitchId | Switches]) ->
   %lager:info("Waiting for switches ~p, currently ~p.", [[TableId | Tables], TableId]),
-  Socket = tablevisor_switch_get(TableId, socket),
+  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
   case Socket of
     false ->
       timer:sleep(1000),
-      tablevisor_wait_for_switches([TableId | Tables]);
+      tablevisor_wait_for_switches([SwitchId | Switches]);
     _ ->
       %lager:info("Switch ~p removed from waiting queue.", [TableId]),
-      tablevisor_wait_for_switches(Tables)
+      tablevisor_wait_for_switches(Switches)
   end;
 tablevisor_wait_for_switches([]) ->
   true.
@@ -354,15 +382,15 @@ tablevisor_topology_discovery() ->
   tablevisor_topology_discovery_apply(Graph).
 
 tablevisor_topology_discovery_flowmod(FlowModTimeout) ->
-  Tables = tablevisor_tables(),
-  tablevisor_topology_discovery_flowmod(Tables, FlowModTimeout).
-tablevisor_topology_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
+  Switches = tablevisor_switchid_list(),
+  tablevisor_topology_discovery_flowmod(Switches, FlowModTimeout).
+tablevisor_topology_discovery_flowmod([SwitchId | Switches], FlowModTimeout) ->
   % get socket for current table (switch)
-  Socket = tablevisor_switch_get(TableId, socket),
+  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
   % build request for single switch
   Request = #ofp_table_features_request{},
   % get all port numbers from current table
-  [{_TableId, TableFeaturesReply} | _] = tablevisor_multi_request([{TableId, Request}], 2000),
+  [{_TableId, TableFeaturesReply} | _] = tablevisor_multi_request([{SwitchId, Request}], 2000),
   TableList = [TableFeatures#ofp_table_features.table_id || TableFeatures <- TableFeaturesReply#ofp_table_features_reply.body],
   % generate Flow mod to push all LLDP packets to controller
   [
@@ -383,23 +411,23 @@ tablevisor_topology_discovery_flowmod([TableId | Tables], FlowModTimeout) ->
     || Tid <- TableList
   ],
 % continue with topology discovery flowmods with other tables
-  tablevisor_topology_discovery_flowmod(Tables, FlowModTimeout);
+  tablevisor_topology_discovery_flowmod(Switches, FlowModTimeout);
 tablevisor_topology_discovery_flowmod([], _FlowModTimeout) ->
   true.
 
 tablevisor_topology_discovery_listener() ->
-  Tables = tablevisor_tables(),
-  tablevisor_topology_discovery_listener(Tables, []).
-tablevisor_topology_discovery_listener([TableId | Tables], ReceiverPidList) ->
+  Switches = tablevisor_switchid_list(),
+  tablevisor_topology_discovery_listener(Switches, []).
+tablevisor_topology_discovery_listener([SwitchId | Switches], ReceiverPidList) ->
   ReceiverPid = spawn(
     fun() ->
-      Socket = tablevisor_switch_get(TableId, socket),
-      Pid = tablevisor_switch_get(Socket, pid),
+      Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+      Pid = tablevisor_switch_get({socket, Socket}, pid),
       Pid ! {add_waiter, self()},
-      tablevisor_topology_discovery_receiver(TableId)
+      tablevisor_topology_discovery_receiver(SwitchId)
     end),
   % continue with topology discovery listeners with other tables
-  tablevisor_topology_discovery_listener(Tables, ReceiverPidList ++ [ReceiverPid]);
+  tablevisor_topology_discovery_listener(Switches, ReceiverPidList ++ [ReceiverPid]);
 tablevisor_topology_discovery_listener([], ReceiverPidList) ->
   ReceiverPidList.
 
@@ -430,15 +458,15 @@ tablevisor_topology_discovery_receiver(TableId, ConnectionList) ->
   end.
 
 tablevisor_topology_discovery_lldp() ->
-  Tables = tablevisor_tables(),
-  tablevisor_topology_discovery_lldp(Tables).
-tablevisor_topology_discovery_lldp([TableId | Tables]) ->
+  Switches = tablevisor_switchid_list(),
+  tablevisor_topology_discovery_lldp(Switches).
+tablevisor_topology_discovery_lldp([SwitchId | Switches]) ->
   % get socket for current table (switch)
-  Socket = tablevisor_switch_get(TableId, socket),
+  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
   % build request for single switch
   Request = #ofp_port_stats_request{port_no = any},
   % get all port numbers from current table
-  [{_TableId, PortStatsReply} | _] = tablevisor_multi_request([{TableId, Request}], 2000),
+  [{_TableId, PortStatsReply} | _] = tablevisor_multi_request([{SwitchId, Request}], 2000),
   % anonymous function for sending LLDP packets
   LLDPSender =
     fun(OutputPortNo) ->
@@ -446,7 +474,7 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
       EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
       % build LLDP packet
       LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
-        #chassis_id{value = <<TableId>>},
+        #chassis_id{value = <<SwitchId>>},
         #port_id{value = <<OutputPortNo>>},
         #ttl{value = 5}
       ]}),
@@ -466,7 +494,7 @@ tablevisor_topology_discovery_lldp([TableId | Tables]) ->
     || PortStats <- PortStatsReply#ofp_port_stats_reply.body
   ],
   % continue with topology discovery with other tables
-  tablevisor_topology_discovery_lldp(Tables);
+  tablevisor_topology_discovery_lldp(Switches);
 tablevisor_topology_discovery_lldp([]) ->
   true.
 
@@ -513,7 +541,7 @@ tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, [DstTable
     {_E, V1, V2, {P1, P2}} ->
       lager:info("Discovered Connection:  [ Switch ~p ]--(~p)--------(~p)--[ Switch ~p ]", [V1, P1, P2, V2]),
       tablevisor_us4:tablevisor_log("~sDiscovered Connection:  [ ~sSwitch ~p~s ]--(~p)--------(~p)--[ ~sSwitch ~p~s ]", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), V1, tablevisor_us4:tvlc(green), P1, P2, tablevisor_us4:tvlc(green, b), V2, tablevisor_us4:tvlc(green)]),
-      OutportMap = tablevisor_switch_get(SrcTableId, outportmap),
+      OutportMap = tablevisor_switch_get({switchid, SrcTableId}, outportmap),
       OutportMap2 = OutportMap ++ [{V2, P1}],
       tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);
     _ ->
@@ -574,9 +602,9 @@ tablevisor_multi_request(Requests, Timeout) ->
   % start transmitter
   [spawn(
     fun() ->
-      tablevisor_transmitter(TableId, Request, Timeout, ReceiverPid)
+      tablevisor_transmitter(SwitchId, Request, Timeout, ReceiverPid)
     end)
-    || {TableId, Request} <- Requests],
+    || {SwitchId, Request} <- Requests],
   % wait for response
   receive
     {replies, Replies} ->
@@ -604,15 +632,15 @@ tablevisor_multi_receiver(N, Timeout, Caller, Replies) ->
     lager:error("Timeout")
   end.
 
-tablevisor_transmitter(TableId, Request, Timeout, ReceiverPid) ->
-  lager:debug("send to ~p with message ~p", [TableId, Request]),
+tablevisor_transmitter(SwitchId, Request, Timeout, ReceiverPid) ->
+  lager:debug("send to ~p with message ~p", [SwitchId, Request]),
   % convert request to valid OpenFlow message
   Message = tablevisor_ctrl4:message(Request),
   % send the request and wait for reply
-  {reply, Reply} = tablevisor_ctrl4:send(TableId, Message, Timeout),
+  {reply, Reply} = tablevisor_ctrl4:send(SwitchId, Message, Timeout),
   % return reply to receiver
   lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]),
-  ReceiverPid ! {ok, TableId, Reply}.
+  ReceiverPid ! {ok, SwitchId, Reply}.
 
 tablevisor_transmitter(TableId, Request) ->
   lager:info("send to ~p with message ~p", [TableId, Request]),
@@ -627,19 +655,19 @@ tablevisor_transmitter(TableId, Request) ->
 %%% Sender
 %%%-----------------------------------------------------------------------------
 
-send(TableId, Message) when is_integer(TableId) ->
-  Socket = tablevisor_switch_get(TableId, socket),
+send(SwitchId, Message) when is_integer(SwitchId) ->
+  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
   send(Socket, Message);
 send(Socket, Message) ->
   %lager:info("Send (cast) to ~p, message ~p", [Socket, Message]),
   do_send(Socket, Message),
   {noreply, ok}.
 
-send(TableId, Message, Timeout) when is_integer(TableId) ->
-  Socket = tablevisor_switch_get(TableId, socket),
+send(SwitchId, Message, Timeout) when is_integer(SwitchId) ->
+  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
   send(Socket, Message, Timeout);
 send(Socket, Message, Timeout) ->
-  Pid = tablevisor_switch_get(Socket, pid),
+  Pid = tablevisor_switch_get({socket, Socket}, pid),
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
   lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
@@ -695,5 +723,3 @@ echo_reply() ->
   echo_reply(<<>>).
 echo_reply(Data) ->
   #ofp_echo_reply{data = Data}.
-
-
