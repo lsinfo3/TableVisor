@@ -499,12 +499,10 @@ tablevisor_topology_discovery_fetcher(ReceiverPidList) ->
   tablevisor_topology_discovery_fetcher(ReceiverPidList, []).
 tablevisor_topology_discovery_fetcher([ReceiverPid | ReceiverPidList], ConnectionList) ->
   ReceiverPid ! {get_replies, self()},
-  receive
-    {connections, NewConnections} ->
-      true
-  after 10000 ->
-    NewConnections = []
-  end,
+  NewConnections =
+    receive {connections, NewConnections2} -> NewConnections2
+    after 10000 -> []
+    end,
   tablevisor_topology_discovery_fetcher(ReceiverPidList, ConnectionList ++ NewConnections);
 tablevisor_topology_discovery_fetcher([], ConnectionList) ->
   ConnectionList.

@@ -206,13 +206,11 @@ tablevisor_create_switch_config(Switch) ->
                    _ -> lists:seq(0, 255)
                  end,
   OutportMap = tablevisor_config_read_outportmap(SwitchConfig),
-% read back line mapping for connections from last table to switch 0
-  case lists:keyfind(flowmods, 1, SwitchConfig) of
-    {flowmods, FlowMods} ->
-      true;
-    false ->
-      FlowMods = []
-  end,
+  % read back line mapping for connections from last table to switch 0
+  FlowMods = case lists:keyfind(flowmods, 1, SwitchConfig) of
+               {flowmods, FlowMods2} -> FlowMods2;
+               _ -> []
+             end,
   % generate config
   TVSwitch = #tv_switch{
     switchid = SwitchId,
@@ -300,32 +298,33 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
         % get first (and only) goto-table-action-instruction
         [GotoTableInstruction | _] = GotoTableInstructionList,
         Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, GotoTableInstruction#ofp_instruction_goto_table.table_id),
-        case is_integer(Outport) of
-          false ->
-            % there is no output port for goto-table defined -> leave untouched
-            FinalInstructionList = FlowMod2#ofp_flow_mod.instructions;
-          true ->
-            % extract apply-action-instructions from instructions
-            ApplyActionInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_apply_actions)],
-            case ApplyActionInstructionList == [] of
-              true ->
-                % no apply-action-instruction -> create new apply-action-instruction
-                ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
-              false ->
-                % the the first (and only) apply-action-instruction
-                [ApplyActionInstruction | _] = ApplyActionInstructionList
-            end,
-            % create output action and append it to apply-action-instruction
-            OutputAction = #ofp_action_output{port = Outport},
-            % filter all apply-actions from instructions
-            % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
-            FilteredInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
-            % filter all output-actions form apply-actions
-            FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
-            % create final instruction by filtered instructions without goto-table-instruction
-            %    + refactored apply-action-instruction
-            FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction]
-        end,
+        FinalInstructionList =
+          case is_integer(Outport) of
+            false ->
+              % there is no output port for goto-table defined -> leave untouched
+              FlowMod2#ofp_flow_mod.instructions;
+            true ->
+              % extract apply-action-instructions from instructions
+              ApplyActionInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_apply_actions)],
+              case ApplyActionInstructionList == [] of
+                true ->
+                  % no apply-action-instruction -> create new apply-action-instruction
+                  ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
+                false ->
+                  % the the first (and only) apply-action-instruction
+                  [ApplyActionInstruction | _] = ApplyActionInstructionList
+              end,
+              % create output action and append it to apply-action-instruction
+              OutputAction = #ofp_action_output{port = Outport},
+              % filter all apply-actions from instructions
+              % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
+              FilteredInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
+              % filter all output-actions form apply-actions
+              FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
+              % create final instruction by filtered instructions without goto-table-instruction
+              %    + refactored apply-action-instruction
+              FilteredInstructionList ++ [FinalApplyActionInstruction]
+          end,
         %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
         % read device table id
         DevTableId = TVSwitch#tv_switch.processtable
@@ -778,50 +777,51 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     fun(SwitchId, FlowEntry) ->
       % extract apply-action-instructions from all instructions
       ApplyActionInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, is_record(I, ofp_instruction_apply_actions)],
-      case ApplyActionInstructionList == [] of
-        true ->
-          % there are no apply-action-instructions -> leave untouched
-          FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-        false ->
-          % get first (and only available) apply-action-instruction
-          [ApplyActionInstruction | _] = ApplyActionInstructionList,
-          % extract output-actions from apply-actions
-          OutputActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_output)],
-          case OutputActionList == [] of
-            true ->
-              % there are no output-actions -> leave untouched
-              FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-            false ->
-              % extract first (and only available) outupt-action
-              [OutputAction | _] = OutputActionList,
-              % read port
-              OutPort = OutputAction#ofp_action_output.port,
-              % check if the output-port is a goto-table-connection
-              OutputTableId = tablevisor_ctrl4:tablevisor_switch_get_gototable(SwitchId, OutPort),
-              case OutputTableId of
-                false ->
-                  % no mapping from output-port to destination table -> leave untouched
-                  FinalInstructionList = FlowEntry#ofp_flow_stats.instructions;
-                _ ->
-                  % the inspected output-action is a goto-table-connection
-                  % create goto-table instruction
-                  GotoTableInstruction = #ofp_instruction_goto_table{table_id = OutputTableId},
-                  % filter all apply-actions from instructions
-                  FilteredInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, not(is_record(I, ofp_instruction_apply_actions))],
-                  % filter all output-actions form apply-actions
-                  FilteredApplyActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, not(is_record(A, ofp_action_output))],
-                  % set new filtered apply-actions to apply-action-instruction without ouput-action
-                  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = FilteredApplyActionList},
-                  % lager:info("Filtered Instructions: ~p", [FilteredInstructionList]),
-                  % lager:info("Final ApplyAction Instructions: ~p", [FinalApplyActionInstruction]),
-                  % lager:info("GotoTableInstruction: ~p", [GotoTableInstruction]),
-                  % create final instruction by filtered instructions without apply-actions-instruction
-                  %    + filtered apply-action-instruction without output-action
-                  %    + generated goto-table instruction
-                  FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction] ++ [GotoTableInstruction]
-              end
-          end
-      end,
+      FinalInstructionList =
+        case ApplyActionInstructionList == [] of
+          true ->
+            % there are no apply-action-instructions -> leave untouched
+            FlowEntry#ofp_flow_stats.instructions;
+          false ->
+            % get first (and only available) apply-action-instruction
+            [ApplyActionInstruction | _] = ApplyActionInstructionList,
+            % extract output-actions from apply-actions
+            OutputActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, is_record(A, ofp_action_output)],
+            case OutputActionList == [] of
+              true ->
+                % there are no output-actions -> leave untouched
+                FlowEntry#ofp_flow_stats.instructions;
+              false ->
+                % extract first (and only available) outupt-action
+                [OutputAction | _] = OutputActionList,
+                % read port
+                OutPort = OutputAction#ofp_action_output.port,
+                % check if the output-port is a goto-table-connection
+                OutputTableId = tablevisor_ctrl4:tablevisor_switch_get_gototable(SwitchId, OutPort),
+                case OutputTableId of
+                  false ->
+                    % no mapping from output-port to destination table -> leave untouched
+                    FlowEntry#ofp_flow_stats.instructions;
+                  _ ->
+                    % the inspected output-action is a goto-table-connection
+                    % create goto-table instruction
+                    GotoTableInstruction = #ofp_instruction_goto_table{table_id = OutputTableId},
+                    % filter all apply-actions from instructions
+                    FilteredInstructionList = [I || I <- FlowEntry#ofp_flow_stats.instructions, not(is_record(I, ofp_instruction_apply_actions))],
+                    % filter all output-actions form apply-actions
+                    FilteredApplyActionList = [A || A <- ApplyActionInstruction#ofp_instruction_apply_actions.actions, not(is_record(A, ofp_action_output))],
+                    % set new filtered apply-actions to apply-action-instruction without ouput-action
+                    FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = FilteredApplyActionList},
+                    % lager:info("Filtered Instructions: ~p", [FilteredInstructionList]),
+                    % lager:info("Final ApplyAction Instructions: ~p", [FinalApplyActionInstruction]),
+                    % lager:info("GotoTableInstruction: ~p", [GotoTableInstruction]),
+                    % create final instruction by filtered instructions without apply-actions-instruction
+                    %    + filtered apply-action-instruction without output-action
+                    %    + generated goto-table instruction
+                    FilteredInstructionList ++ [FinalApplyActionInstruction] ++ [GotoTableInstruction]
+                end
+            end
+        end,
       %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
       % insert instructions into flow entry and replace tableid
       TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
@@ -1347,18 +1347,21 @@ tablevisor_init_connection(SwitchId) ->
   % create flow entry
   CreateFlowMod = fun(FlowModConfig) ->
     % read and set values
-    case lists:keyfind(tableid, 1, FlowModConfig) of
-      {tableid, TableId2} -> false;
-      false -> TableId2 = 0
-    end,
-    case lists:keyfind(priority, 1, FlowModConfig) of
-      {priority, Priority} -> false;
-      false -> Priority = 100
-    end,
-    case lists:keyfind(outport, 1, FlowModConfig) of
-      {outport, OutPort} -> false;
-      false -> OutPort = 0
-    end,
+    TableId2 =
+      case lists:keyfind(tableid, 1, FlowModConfig) of
+        {tableid, TableId3} -> TableId3;
+        false -> 0
+      end,
+    Priority =
+      case lists:keyfind(priority, 1, FlowModConfig) of
+        {priority, Priority2} -> Priority2;
+        false -> 100
+      end,
+    OutPort =
+      case lists:keyfind(outport, 1, FlowModConfig) of
+        {outport, OutPort2} -> OutPort2;
+        false -> 0
+      end,
     case lists:keyfind(match, 1, FlowModConfig) of
       {match, Matches} -> MatchList = CreateMatches(Matches);
       false -> MatchList = []
