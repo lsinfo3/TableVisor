@@ -13,6 +13,7 @@
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("pkt/include/pkt.hrl").
 -include_lib("pkt2/include/pkt_lldp.hrl").
+-include_lib("../../tablevisor_us4/include/tablevisor.hrl").
 
 -compile([{parse_transform, lager_transform}]).
 
@@ -22,9 +23,10 @@
   send/2,
   send/3,
   message/1,
-  tablevisor_switches/0,
-  tablevisor_switchid_list/0,
   tablevisor_tables/0,
+  tablevisor_switch_set/1,
+  tablevisor_switch_get/0,
+  tablevisor_switch_get/1,
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
@@ -123,7 +125,7 @@ filter_waiters(Waiters) ->
   [Waiter || Waiter <- Waiters, is_process_alive(Waiter)].
 
 send_features_request(Socket, Pid) ->
-  timer:sleep(5000),
+  timer:sleep(2000),
   Message = features_request(),
   Xid = Message#ofp_message.xid,
   lager:info("Send features request to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
@@ -138,10 +140,9 @@ send_features_request(Socket, Pid) ->
       DataPathMac = Body#ofp_features_reply.datapath_mac,
       DataPathId = binary_to_int(DataPathMac),
       tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p (dpid ~.16B)", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket, DataPathId]),
-      %lager:info("DataPathId ~p", [DataPathId]),
       {ok, SwitchId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Switch-Id ~p", [DataPathId, Socket, Pid, SwitchId]),
-      tablevisor_us4:tablevisor_log("~sRegistered switch with dpid ~.16B representing table ~s~p", [tablevisor_us4:tvlc(green), DataPathId, tablevisor_us4:tvlc(green, b), SwitchId]),
+      tablevisor_us4:tablevisor_log("~sRegistered switch ~p with dpid ~.16B", [tablevisor_us4:tvlc(green), SwitchId, DataPathId]),
       % set flow mod to enable process table different 0
       tablevisor_us4:tablevisor_init_connection(SwitchId),
       true
@@ -170,11 +171,11 @@ handle_input(Socket, Message) ->
       lager:debug("Received features reply message from ~p: ~p", [Socket, Message]);
     #ofp_message{body = #ofp_packet_in{}} ->
       lager:debug("Received packet in from ~p: ~p", [Socket, Message]),
-      case tablevisor_switch_get({socket, Socket}, switchid) of
+      case tablevisor_switch_get(Socket, socket) of
         false ->
           false;
-        SwitchId ->
-          tablevisor_us4:ofp_packet_in(SwitchId, Message)
+        TVSwitch ->
+          tablevisor_us4:ofp_packet_in(TVSwitch#tv_switch.switchid, Message)
       end;
     #ofp_message{} ->
       lager:debug("Received message from ~p: ~p", [Socket, Message])
@@ -231,135 +232,132 @@ binary_to_int(Bin) ->
 tablevisor_switch_remove(_Socket) ->
   true.
 
-tablevisor_switch_connect(DataPathId, Socket, Pid) ->
-  SwitchConfig = tablevisor_switches(),
-  SearchByDpId =
-    fun(SwitchId, Config) ->
-      {dpid, DpId} = lists:keyfind(dpid, 1, Config),
-      case DpId of
-        DataPathId ->
-          tablevisor_switch_set(SwitchId, socket, Socket),
-          tablevisor_switch_set(SwitchId, pid, Pid),
-          ets:insert(tablevisor_socket, {Socket, SwitchId});
-        _ ->
-          false
-      end
-    end,
-  [SearchByDpId(SwitchId, Config) || {SwitchId, Config} <- SwitchConfig],
-  SwitchId = tablevisor_switch_get({socket, Socket}, switchid),
-  {ok, SwitchId}.
+tablevisor_switch_connect(DatapathId, Socket, Pid) ->
+  TVSwitch = tablevisor_switch_get(DatapathId, datapathid),
+  TVSwitch2 = TVSwitch#tv_switch{socket = Socket, pid = Pid},
+  tablevisor_switch_set(TVSwitch2),
+  {ok, TVSwitch2#tv_switch.switchid}.
 
-tablevisor_switch_get({switchid, SwitchId}, switchid) ->
-  SwitchId;
-tablevisor_switch_get({tableid, TableId}, Key) ->
-  Switches = tablevisor_switches(),
-  TableFilter =
-    fun({SwitchId, Config}, TableId2) ->
-      case lists:keyfind(tableid, 1, Config) of
-        {tableid, TableId2} -> SwitchId;
-        _ -> false
-      end
-    end,
-  SwitchList = [
-    Sid || Sid <- [TableFilter(Switch, TableId) || Switch <- Switches],
-    Sid =/= false
-  ],
-  case SwitchList of
-    [] ->
-      false;
-    _ ->
-      SwitchId = lists:nth(1, SwitchList),
-      tablevisor_switch_get({switchid, SwitchId}, Key)
-  end;
-tablevisor_switch_get({switchid, SwitchId}, Key) ->
+-spec tablevisor_switch_get() ->
+  [#tv_switch{}].
+tablevisor_switch_get() ->
+  SwitchConfig = ets:tab2list(tablevisor_switch),
+  [TVSwitch || {_SwitchId, TVSwitch} <- SwitchConfig].
+
+-spec tablevisor_switch_get(integer()) ->
+  #tv_switch{}.
+tablevisor_switch_get(SwitchId) ->
   try
-    Config = ets:lookup_element(tablevisor_switch, SwitchId, 2),
-    % lager:warning("Key ~p, Config ~p", [Key, Config]),
-    {Key, Value} = lists:keyfind(Key, 1, Config),
-    Value
+    ets:lookup_element(tablevisor_switch, SwitchId, 2)
   catch
     error:badarg ->
       lager:error("No Switch with SwitchId ~p registered", [SwitchId]),
       false
+  end.
+
+-spec tablevisor_switch_get(integer(), atom()) ->
+  #tv_switch{}.
+tablevisor_switch_get(Socket, socket) ->
+  SwitchList = tablevisor_switch_get(),
+  SwitchesFiltered = lists:filter(fun(TVSwitch) ->
+    case TVSwitch#tv_switch.socket of
+      Socket -> true;
+      _ -> false
+    end end, SwitchList),
+  Length = length(SwitchesFiltered),
+  if
+    Length > 0 ->
+      lists:nth(1, SwitchesFiltered);
+    true ->
+      false
   end;
-tablevisor_switch_get({socket, Socket}, Key) ->
-  try
-    SwitchId = ets:lookup_element(tablevisor_socket, Socket, 2),
-    tablevisor_switch_get({switchid, SwitchId}, Key)
-  catch
-    error:badarg ->
-      lager:error("No Switch with Socket ~p registered", [Socket]),
+tablevisor_switch_get(TableId, tableid) ->
+  SwitchList = tablevisor_switch_get(),
+  SwitchesFiltered = lists:filter(fun(TVSwitch) ->
+    case TVSwitch#tv_switch.tableid of
+      TableId -> true;
+      _ -> false
+    end end, SwitchList),
+  Length = length(SwitchesFiltered),
+  if
+    Length > 0 ->
+      lists:nth(1, SwitchesFiltered);
+    true ->
+      false
+  end;
+tablevisor_switch_get(DatapathId, datapathid) ->
+  SwitchList = tablevisor_switch_get(),
+  SwitchesFiltered = lists:filter(fun(TVSwitch) ->
+    case TVSwitch#tv_switch.datapathid of
+      DatapathId -> true;
+      _ -> false
+    end end, SwitchList),
+  Length = length(SwitchesFiltered),
+  if
+    Length > 0 ->
+      lists:nth(1, SwitchesFiltered);
+    true ->
       false
   end.
 
-tablevisor_switch_set(SwitchId, Key, NewValue) ->
+-spec tablevisor_switch_set(#tv_switch{}) ->
+  true.
+tablevisor_switch_set(#tv_switch{switchid = SwitchId} = TVSwitch) ->
   try
-    ReplaceConfig =
-      fun(OldKey, OldValue) ->
-        case OldKey of
-          Key ->
-            {OldKey, NewValue};
-          _ ->
-            {OldKey, OldValue}
-        end
-      end,
-    Config = ets:lookup_element(tablevisor_switch, SwitchId, 2),
-    NewConfig = [ReplaceConfig(Key2, Value2) || {Key2, Value2} <- Config],
-    ets:insert(tablevisor_switch, {SwitchId, NewConfig})
+    ets:insert(tablevisor_switch, {SwitchId, TVSwitch})
   catch
     error:badarg ->
       lager:error("Error in tablevisor_switch_set", [SwitchId]),
       false
   end.
 
--spec tablevisor_switches() -> true.
-tablevisor_switches() ->
-  ets:tab2list(tablevisor_switch).
-
-tablevisor_switchid_list() ->
-  Switches = tablevisor_switches(),
-  [SwitchId || {SwitchId, _} <- Switches].
-
 -spec tablevisor_tables() -> true.
 tablevisor_tables() ->
-  Switches = tablevisor_switches(),
-  [TableId || {TableId, _} <- Switches].
+  Switches = tablevisor_switch_get(),
+  [TVSwitch#tv_switch.tableid || TVSwitch <- Switches].
 
 tablevisor_switch_get_outport(SrcSwitchId, DstTableId) ->
-  DstSwitchId = tablevisor_switch_get({tableid, DstTableId}, switchid),
-  OutportMap = tablevisor_switch_get({switchid, SrcSwitchId}, outportmap),
-  Result = lists:keyfind(DstSwitchId, 1, OutportMap),
+  SrcSwitch = tablevisor_switch_get(SrcSwitchId),
+  DstSwitch = tablevisor_switch_get(DstTableId, tableid),
+  Result = lists:keyfind(DstSwitch#tv_switch.switchid, 1, SrcSwitch#tv_switch.outportmap),
   case Result of
-    {DstSwitchId, Outport} ->
+    {_DstSwitchId, Outport} ->
       Outport;
     false ->
       false
   end.
 
 tablevisor_switch_get_gototable(SrcSwitchId, OutPort) ->
-  OutportMap = tablevisor_switch_get({switchid, SrcSwitchId}, outportmap),
-  DstSwitches = [D || {D, OutPort2} <- OutportMap, OutPort2 == OutPort],
+  TVSwitch = tablevisor_switch_get(SrcSwitchId),
+  DstSwitches = [D
+    || {D, OutPort2} <- TVSwitch#tv_switch.outportmap,
+    OutPort2 == OutPort],
   case DstSwitches == [] of
     true ->
       false;
     false ->
       [DstSwitchId | _] = DstSwitches,
-      tablevisor_switch_get({switchid, DstSwitchId}, tableid)
+      TVSwitch2 = tablevisor_switch_get(DstSwitchId),
+      TVSwitch2#tv_switch.tableid
   end.
 
 tablevisor_wait_for_switches() ->
-  Switches = tablevisor_switchid_list(),
-  tablevisor_wait_for_switches(Switches).
-tablevisor_wait_for_switches([SwitchId | Switches]) ->
+  SwitchList = tablevisor_switch_get(),
+  SwitchIdList = [
+    TVSwitch#tv_switch.switchid || TVSwitch <- SwitchList
+  ],
+  tablevisor_wait_for_switches(SwitchIdList).
+tablevisor_wait_for_switches([SwitchId | SwitchIdList]) ->
   %lager:info("Waiting for switches ~p, currently ~p.", [[TableId | Tables], TableId]),
-  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+  TVSwitch = tablevisor_switch_get(SwitchId),
+  Socket = TVSwitch#tv_switch.socket,
   case Socket of
     false ->
       timer:sleep(1000),
-      tablevisor_wait_for_switches([SwitchId | Switches]);
+      tablevisor_wait_for_switches([SwitchId | SwitchIdList]);
     _ ->
       %lager:info("Switch ~p removed from waiting queue.", [TableId]),
-      tablevisor_wait_for_switches(Switches)
+      tablevisor_wait_for_switches(SwitchIdList)
   end;
 tablevisor_wait_for_switches([]) ->
   true.
@@ -382,15 +380,15 @@ tablevisor_topology_discovery() ->
   tablevisor_topology_discovery_apply(Graph).
 
 tablevisor_topology_discovery_flowmod(FlowModTimeout) ->
-  Switches = tablevisor_switchid_list(),
-  tablevisor_topology_discovery_flowmod(Switches, FlowModTimeout).
-tablevisor_topology_discovery_flowmod([SwitchId | Switches], FlowModTimeout) ->
+  SwitchList = tablevisor_switch_get(),
+  tablevisor_topology_discovery_flowmod(SwitchList, FlowModTimeout).
+tablevisor_topology_discovery_flowmod([TVSwitch | SwitchList], FlowModTimeout) ->
   % get socket for current table (switch)
-  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+  Socket = TVSwitch#tv_switch.socket,
   % build request for single switch
   Request = #ofp_table_features_request{},
   % get all port numbers from current table
-  [{_TableId, TableFeaturesReply} | _] = tablevisor_multi_request([{SwitchId, Request}], 2000),
+  [{_TableId, TableFeaturesReply} | _] = tablevisor_multi_request([{TVSwitch#tv_switch.switchid, Request}], 2000),
   TableList = [TableFeatures#ofp_table_features.table_id || TableFeatures <- TableFeaturesReply#ofp_table_features_reply.body],
   % generate Flow mod to push all LLDP packets to controller
   [
@@ -411,29 +409,28 @@ tablevisor_topology_discovery_flowmod([SwitchId | Switches], FlowModTimeout) ->
     || Tid <- TableList
   ],
 % continue with topology discovery flowmods with other tables
-  tablevisor_topology_discovery_flowmod(Switches, FlowModTimeout);
+  tablevisor_topology_discovery_flowmod(SwitchList, FlowModTimeout);
 tablevisor_topology_discovery_flowmod([], _FlowModTimeout) ->
   true.
 
 tablevisor_topology_discovery_listener() ->
-  Switches = tablevisor_switchid_list(),
-  tablevisor_topology_discovery_listener(Switches, []).
-tablevisor_topology_discovery_listener([SwitchId | Switches], ReceiverPidList) ->
+  SwitchList = tablevisor_switch_get(),
+  tablevisor_topology_discovery_listener(SwitchList, []).
+tablevisor_topology_discovery_listener([TVSwitch | SwitchList], ReceiverPidList) ->
   ReceiverPid = spawn(
     fun() ->
-      Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
-      Pid = tablevisor_switch_get({socket, Socket}, pid),
+      Pid = TVSwitch#tv_switch.pid,
       Pid ! {add_waiter, self()},
-      tablevisor_topology_discovery_receiver(SwitchId)
+      tablevisor_topology_discovery_receiver(TVSwitch#tv_switch.switchid)
     end),
   % continue with topology discovery listeners with other tables
-  tablevisor_topology_discovery_listener(Switches, ReceiverPidList ++ [ReceiverPid]);
+  tablevisor_topology_discovery_listener(SwitchList, ReceiverPidList ++ [ReceiverPid]);
 tablevisor_topology_discovery_listener([], ReceiverPidList) ->
   ReceiverPidList.
 
-tablevisor_topology_discovery_receiver(TableId) ->
-  tablevisor_topology_discovery_receiver(TableId, []).
-tablevisor_topology_discovery_receiver(TableId, ConnectionList) ->
+tablevisor_topology_discovery_receiver(SwitchId) ->
+  tablevisor_topology_discovery_receiver(SwitchId, []).
+tablevisor_topology_discovery_receiver(SwitchId, ConnectionList) ->
   receive
     {msg, Reply, _Xid} ->
       case Reply of
@@ -445,28 +442,28 @@ tablevisor_topology_discovery_receiver(TableId, ConnectionList) ->
               [IngressPort | _] = [binary_to_int(F#ofp_field.value) || F <- Reply#ofp_message.body#ofp_packet_in.match#ofp_match.fields, is_record(F, ofp_field) andalso F#ofp_field.name =:= in_port],
               [SrcSwitchId | _] = [binary_to_int(F#chassis_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, chassis_id)],
               [EgressPort | _] = [binary_to_int(F#port_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, port_id)],
-              lager:debug("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [TableId, IngressPort, SrcSwitchId, EgressPort]),
-              tablevisor_topology_discovery_receiver(TableId, ConnectionList ++ [{{SrcSwitchId, EgressPort}, {TableId, IngressPort}}]);
+              lager:debug("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [SwitchId, IngressPort, SrcSwitchId, EgressPort]),
+              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList ++ [{{SrcSwitchId, EgressPort}, {SwitchId, IngressPort}}]);
             _ ->
-              tablevisor_topology_discovery_receiver(TableId, ConnectionList)
+              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList)
           end;
         _ ->
-          tablevisor_topology_discovery_receiver(TableId, ConnectionList)
+          tablevisor_topology_discovery_receiver(SwitchId, ConnectionList)
       end;
     {get_replies, ServerPid} ->
       ServerPid ! {connections, ConnectionList}
   end.
 
 tablevisor_topology_discovery_lldp() ->
-  Switches = tablevisor_switchid_list(),
-  tablevisor_topology_discovery_lldp(Switches).
-tablevisor_topology_discovery_lldp([SwitchId | Switches]) ->
+  SwitchList = tablevisor_switch_get(),
+  tablevisor_topology_discovery_lldp(SwitchList).
+tablevisor_topology_discovery_lldp([TVSwitch | SwitchList]) ->
   % get socket for current table (switch)
-  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+  Socket = TVSwitch#tv_switch.socket,
   % build request for single switch
   Request = #ofp_port_stats_request{port_no = any},
   % get all port numbers from current table
-  [{_TableId, PortStatsReply} | _] = tablevisor_multi_request([{SwitchId, Request}], 2000),
+  [{_TableId, PortStatsReply} | _] = tablevisor_multi_request([{TVSwitch#tv_switch.switchid, Request}], 2000),
   % anonymous function for sending LLDP packets
   LLDPSender =
     fun(OutputPortNo) ->
@@ -474,7 +471,7 @@ tablevisor_topology_discovery_lldp([SwitchId | Switches]) ->
       EtherPktBin = pkt_ether:codec(#ether{dhost = <<16#01, 16#80, 16#c2, 16#00, 16#00, 16#0e>>, shost = <<0, 0, 0, 0, 0, 0>>, type = 16#88cc}),
       % build LLDP packet
       LldpPktBin = pkt_lldp:codec(#lldp{pdus = [
-        #chassis_id{value = <<SwitchId>>},
+        #chassis_id{value = <<(TVSwitch#tv_switch.switchid)>>},
         #port_id{value = <<OutputPortNo>>},
         #ttl{value = 5}
       ]}),
@@ -494,7 +491,7 @@ tablevisor_topology_discovery_lldp([SwitchId | Switches]) ->
     || PortStats <- PortStatsReply#ofp_port_stats_reply.body
   ],
   % continue with topology discovery with other tables
-  tablevisor_topology_discovery_lldp(Switches);
+  tablevisor_topology_discovery_lldp(SwitchList);
 tablevisor_topology_discovery_lldp([]) ->
   true.
 
@@ -531,27 +528,35 @@ tablevisor_topology_discovery_build_digraph(G, []) ->
   G.
 
 tablevisor_topology_discovery_apply(Graph) ->
-  Tables = lists:sort(tablevisor_tables()),
-  [SrcTableId | DstTableList] = Tables,
-  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, DstTableList, DstTableList).
+  SwitchList = tablevisor_switch_get(),
+  SwitchIdList = [TVSwitch#tv_switch.switchid || TVSwitch <- SwitchList],
+  tablevisor_topology_discovery_connection_from_graph(Graph, false, SwitchIdList, [], SwitchIdList).
 
-tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, [DstTableId | DstTableList], SrcTableList) ->
-  Edge = tablevisor_digraph_get_edge(Graph, SrcTableId, DstTableId),
+tablevisor_topology_discovery_connection_from_graph(Graph, SrcSwitchId, RemainingSwitches, [DstSwitchId | DstSwitchList], SwitchIdList) ->
+  Edge = tablevisor_digraph_get_edge(Graph, SrcSwitchId, DstSwitchId),
   case Edge of
     {_E, V1, V2, {P1, P2}} ->
-      lager:info("Discovered Connection:  [ Switch ~p ]--(~p)--------(~p)--[ Switch ~p ]", [V1, P1, P2, V2]),
-      tablevisor_us4:tablevisor_log("~sDiscovered Connection:  [ ~sSwitch ~p~s ]--(~p)--------(~p)--[ ~sSwitch ~p~s ]", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), V1, tablevisor_us4:tvlc(green), P1, P2, tablevisor_us4:tvlc(green, b), V2, tablevisor_us4:tvlc(green)]),
-      OutportMap = tablevisor_switch_get({switchid, SrcTableId}, outportmap),
-      OutportMap2 = OutportMap ++ [{V2, P1}],
-      tablevisor_switch_set(SrcTableId, outportmap, OutportMap2);
+      TVSwitchSrc = tablevisor_switch_get(V1),
+      TVSwitchDst = tablevisor_switch_get(V2),
+      if
+        (TVSwitchSrc#tv_switch.tableid =< TVSwitchDst#tv_switch.tableid) ->
+          lager:info("Discovered Connection:  [ Switch ~p ]--(~p)--------(~p)--[ Switch ~p ]", [V1, P1, P2, V2]),
+          tablevisor_us4:tablevisor_log("~sDiscovered Connection:  [ ~sSwitch ~p~s ]--(~p)--------(~p)--[ ~sSwitch ~p~s ]", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), V1, tablevisor_us4:tvlc(green), P1, P2, tablevisor_us4:tvlc(green, b), V2, tablevisor_us4:tvlc(green)]),
+          TVSwitch = tablevisor_switch_get(SrcSwitchId),
+          OutportMap = TVSwitch#tv_switch.outportmap ++ [{V2, P1}],
+          TVSwitch2 = TVSwitch#tv_switch{outportmap = OutportMap},
+          tablevisor_switch_set(TVSwitch2);
+        true ->
+          true
+      end;
     _ ->
       true
     % lager:error("No Connection found:  [ Switch ~p ]--       ?      --[ Switch ~p ]", [SrcTableId, DstTableId])
   end,
-  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, DstTableList, SrcTableList);
-tablevisor_topology_discovery_connection_from_graph(Graph, _SrcTableId, [], [SrcTableId | SrcTableList]) ->
-  tablevisor_topology_discovery_connection_from_graph(Graph, SrcTableId, SrcTableList, SrcTableList);
-tablevisor_topology_discovery_connection_from_graph(_Graph, _SrcTableId, [], []) ->
+  tablevisor_topology_discovery_connection_from_graph(Graph, SrcSwitchId, RemainingSwitches, DstSwitchList, SwitchIdList);
+tablevisor_topology_discovery_connection_from_graph(Graph, _SrcSwitchId, [SrcSwitchId | RemainingSwitches], [], SwitchIdList) ->
+  tablevisor_topology_discovery_connection_from_graph(Graph, SrcSwitchId, RemainingSwitches, SwitchIdList, SwitchIdList);
+tablevisor_topology_discovery_connection_from_graph(_Graph, _SrcSwitchId, [], [], _SwitchIdList) ->
   true.
 
 tablevisor_digraph_get_edge(Graph, V1, V2) ->
@@ -576,8 +581,10 @@ tablevisor_identify_table_position() ->
   Tables = lists:sort(tablevisor_tables()),
   [FirstTableId | _] = Tables,
   [LastTableId | _] = lists:reverse(Tables),
-  tablevisor_switch_set(FirstTableId, position, first),
-  tablevisor_switch_set(LastTableId, position, last).
+  FirstSwitch = tablevisor_switch_get(FirstTableId, tableid),
+  LastSwitch = tablevisor_switch_get(LastTableId, tableid),
+  tablevisor_switch_set(FirstSwitch#tv_switch{position = first}),
+  tablevisor_switch_set(LastSwitch#tv_switch{position = last}).
 
 %%%-----------------------------------------------------------------------------
 %%% TableVisor Sender and Receiver Functions
@@ -656,7 +663,8 @@ tablevisor_transmitter(TableId, Request) ->
 %%%-----------------------------------------------------------------------------
 
 send(SwitchId, Message) when is_integer(SwitchId) ->
-  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+  TVSwitch = tablevisor_switch_get(SwitchId),
+  Socket = TVSwitch#tv_switch.socket,
   send(Socket, Message);
 send(Socket, Message) ->
   %lager:info("Send (cast) to ~p, message ~p", [Socket, Message]),
@@ -664,10 +672,12 @@ send(Socket, Message) ->
   {noreply, ok}.
 
 send(SwitchId, Message, Timeout) when is_integer(SwitchId) ->
-  Socket = tablevisor_switch_get({switchid, SwitchId}, socket),
+  TVSwitch = tablevisor_switch_get(SwitchId),
+  Socket = TVSwitch#tv_switch.socket,
   send(Socket, Message, Timeout);
 send(Socket, Message, Timeout) ->
-  Pid = tablevisor_switch_get({socket, Socket}, pid),
+  TVSwitch = tablevisor_switch_get(Socket, socket),
+  Pid = TVSwitch#tv_switch.pid,
   Pid ! {add_waiter, self()},
   Xid = Message#ofp_message.xid,
   lager:debug("Send (call) to ~p, xid ~p, message ~p", [Socket, Xid, Message]),
@@ -696,7 +706,6 @@ send_multipart_receiver(Xid, Socket, Timeout, PreviousReplyBody) ->
     lager:error("Error while waiting for reply from ~p, xid ~p", [Socket, Xid]),
     {error, timeout}
   end.
-
 
 do_send(Socket, Message) when is_tuple(Message) ->
   case of_protocol:encode(Message) of

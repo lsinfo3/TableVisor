@@ -83,6 +83,7 @@
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("linc/include/linc_logger.hrl").
 -include_lib("../include/linc_us4.hrl").
+-include_lib("../include/tablevisor.hrl").
 
 -record(state, {
   flow_state,
@@ -213,18 +214,16 @@ tablevisor_create_switch_config(Switch) ->
       FlowMods = []
   end,
   % generate config
-  Config = [
-    {dpid, DpId},
-    {tableid, TableId},
-    {outportmap, OutportMap},
-    {socket, false},
-    {pid, false},
-    {processtable, ProcessTable},
-    {priority, PriorityList},
-    {flowmods, FlowMods},
-    {position, intermediate}
-  ],
-  ets:insert(tablevisor_switch, {SwitchId, Config}).
+  TVSwitch = #tv_switch{
+    switchid = SwitchId,
+    datapathid = DpId,
+    tableid = TableId,
+    outportmap = OutportMap,
+    processtable = ProcessTable,
+    priority = PriorityList,
+    flowmods = FlowMods
+  },
+  tablevisor_ctrl4:tablevisor_switch_set(TVSwitch).
 
 tablevisor_config_read_outportmap(SwitchConfig) ->
   ListEntry = lists:keyfind(outportmap, 1, SwitchConfig),
@@ -269,7 +268,7 @@ set_monitor_data(_ClientPid, _Xid, State) ->
 ofp_features_request(#state{switch_id = SwitchId,
   datapath_mac = DatapathMac} = State,
     #ofp_features_request{}) ->
-  SwitchCount = length(tablevisor_ctrl4:tablevisor_switches()),
+  SwitchCount = length(tablevisor_ctrl4:tablevisor_switch_get()),
   FeaturesReply = #ofp_features_reply{datapath_mac = DatapathMac,
     datapath_id = SwitchId,
     n_buffers = 0,
@@ -287,20 +286,20 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
   lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
-  SwitchIdList = [ofp_flow_mod_get_switch_id(FlowMod)],
+  SwitchList = [ofp_flow_mod_get_switch(FlowMod)],
   % anonymous function to generate flow mod
-  RefactorFlowMod = fun(SwitchId, FlowMod2) ->
+  RefactorFlowMod = fun(TVSwitch, FlowMod2) ->
     % extract apply-action-instructions from all instructions
     GotoTableInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
     case GotoTableInstructionList == [] of
       true ->
         % there are no goto-table-instructions -> leave untouched
         FinalInstructionList = FlowMod2#ofp_flow_mod.instructions,
-        DevTableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, processtable);
+        DevTableId = TVSwitch#tv_switch.processtable;
       false ->
         % get first (and only) goto-table-action-instruction
         [GotoTableInstruction | _] = GotoTableInstructionList,
-        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(SwitchId, GotoTableInstruction#ofp_instruction_goto_table.table_id),
+        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, GotoTableInstruction#ofp_instruction_goto_table.table_id),
         case is_integer(Outport) of
           false ->
             % there is no output port for goto-table defined -> leave untouched
@@ -329,13 +328,13 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
         end,
         %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
         % read device table id
-        DevTableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, processtable)
+        DevTableId = TVSwitch#tv_switch.processtable
     end,
     % insert instructions into flow entry and replace tableid
     FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
                     end,
   % build requests
-  Requests = [{SwitchId, RefactorFlowMod(SwitchId, FlowMod)} || SwitchId <- SwitchIdList],
+  Requests = [{TVSwitch#tv_switch.switchid, RefactorFlowMod(TVSwitch, FlowMod)} || TVSwitch <- SwitchList],
   % build requests by applying matadata to mac matching
   MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
   case MetadataProvider of
@@ -358,34 +357,33 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
 
--spec ofp_flow_mod_get_switch_id(ofp_flow_mod()) ->
+-spec ofp_flow_mod_get_switch(ofp_flow_mod()) ->
   integer().
-ofp_flow_mod_get_switch_id(#ofp_flow_mod{table_id = TableId, match = Matches, priority = Priority} = _FlowMod) ->
-  Switches1 = tablevisor_ctrl4:tablevisor_switchid_list(),
+ofp_flow_mod_get_switch(#ofp_flow_mod{table_id = TableId, match = Matches, priority = Priority} = _FlowMod) ->
+  SwitchList1 = tablevisor_ctrl4:tablevisor_switch_get(),
   % filter switches by table id
-  Switches2 = lists:filter(
-    fun(SwitchId) ->
-      case tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, tableid) of
+  SwitchList2 = lists:filter(
+    fun(TVSwitch) ->
+      case TVSwitch#tv_switch.tableid of
         TableId -> true;
         _ -> false
       end
-    end, Switches1),
+    end, SwitchList1),
   % filter switches by flow mod priority
-  Switches3 = lists:filter(
-    fun(SwitchId) ->
-      PriorityList = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, priority),
-      lists:member(Priority, PriorityList)
-    end, Switches2),
+  SwitchList3 = lists:filter(
+    fun(TVSwitch) ->
+      lists:member(Priority, TVSwitch#tv_switch.priority)
+    end, SwitchList2),
   % generate hash from match
   %Matches = FlowMod#ofp_flow_mod.match#ofp_match.fields
   IntHash = erlang:crc32(term_to_binary(Matches)),
   MaxHash = 16#ffffffff,
   Hash = IntHash / MaxHash,
   % calculate switch number from hash
-  WeightedHash = Hash * length(Switches3),
+  WeightedHash = Hash * length(SwitchList3),
   SwitchNo = trunc(WeightedHash) + 1,
-  lager:debug("SwitchList ~p, WeighedHash ~p, SwitchNo ~p", [Switches3, WeightedHash, SwitchNo]),
-  lists:nth(SwitchNo, Switches3).
+  lager:debug("SwitchList ~p, WeighedHash ~p, SwitchNo ~p", [SwitchList3, WeightedHash, SwitchNo]),
+  lists:nth(SwitchNo, SwitchList3).
 
 apply_metadata_provider(Provider, {SwitchId, FlowMod1}) ->
   % remove set field
@@ -393,7 +391,8 @@ apply_metadata_provider(Provider, {SwitchId, FlowMod1}) ->
     instructions = metadata_remove_instruction_setfield(Provider, FlowMod1#ofp_flow_mod.instructions)
   },
   % set position specific flow mods
-  Position = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, position),
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+  Position = TVSwitch#tv_switch.position,
   FlowMod3 = metatdata_apply_tableposition_action(Provider, Position, FlowMod2),
   % apply write metatdata
   {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod3#ofp_flow_mod.instructions),
@@ -645,7 +644,8 @@ ofp_group_mod(#state{switch_id = SwitchId} = State,
 -spec ofp_packet_in(integer(), ofp_packet_in()) ->
   no_return().
 ofp_packet_in(SwitchId, Message) ->
-  TableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, tableid),
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+  TableId = TVSwitch#tv_switch.tableid,
   NewMessage = Message#ofp_message{body = Message#ofp_message.body#ofp_packet_in{table_id = TableId}},
   linc_logic:send_to_controllers(0, NewMessage).
 
@@ -749,9 +749,11 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
     fun(TableId) ->
       case TableId of
         all ->
-          tablevisor_ctrl4:tablevisor_switchid_list();
+          SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
+          [TVSwitch#tv_switch.switchid || TVSwitch <- SwitchList];
         _ ->
-          [tablevisor_ctrl4:tablevisor_switch_get({tableid, TableId}, switchid)]
+          TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(TableId, tableid),
+          [TVSwitch#tv_switch.switchid]
       end
     end,
   % get table id list
@@ -759,8 +761,8 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
   % anonymous function to generate indivudal table request
   GenerateTableRequest =
     fun(SwitchId, Request2) ->
-      DevTableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, processtable),
-      Request2#ofp_flow_stats_request{table_id = DevTableId}
+      TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+      Request2#ofp_flow_stats_request{table_id = TVSwitch#tv_switch.processtable}
     end,
   % build requests
   Requests = [{SwitchId, GenerateTableRequest(SwitchId, Request)} || SwitchId <- SwitchIdList],
@@ -822,8 +824,8 @@ ofp_flow_stats_request(#state{switch_id = _SwitchId} = State, #ofp_flow_stats_re
       end,
       %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
       % insert instructions into flow entry and replace tableid
-      TableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, tableid),
-      FlowEntry#ofp_flow_stats{table_id = TableId, instructions = FinalInstructionList}
+      TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+      FlowEntry#ofp_flow_stats{table_id = TVSwitch#tv_switch.tableid, instructions = FinalInstructionList}
     end,
   % log
   [begin
@@ -1092,7 +1094,7 @@ ofp_table_features_request(#state{switch_id = _SwitchId} = State, #ofp_table_fea
   tablevisor_log("~sReceived ~stable-features-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
   lager:info("Received table_features_request from Controller"),
   % get switch id list
-  SwitchIdList = tablevisor_ctrl4:tablevisor_switchid_list(),
+  SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
   % anonymous function to generate individual table request
   TableFeaturesRequest =
     fun(OriginalRequest) ->
@@ -1101,7 +1103,7 @@ ofp_table_features_request(#state{switch_id = _SwitchId} = State, #ofp_table_fea
       }
     end,
   % build requests
-  Requests = [{SwitchId, TableFeaturesRequest(Request)} || SwitchId <- SwitchIdList],
+  Requests = [{TVSwitch#tv_switch.switchid, TableFeaturesRequest(Request)} || TVSwitch <- SwitchList],
   % send requests and receives replies
   Replies = tablevisor_ctrl4:tablevisor_multi_request(Requests, 2000),
   TableFeatures = [ofp_table_features_request_parse_tables(SwitchId, Reply) || {SwitchId, Reply} <- Replies],
@@ -1113,7 +1115,8 @@ ofp_table_features_request(#state{switch_id = _SwitchId} = State, #ofp_table_fea
   {reply, Reply, State}.
 
 ofp_table_features_request_parse_tables(SwitchId, Reply) ->
-  ProcessTableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, processtable),
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+  ProcessTableId = TVSwitch#tv_switch.processtable,
   TableFeaturesList = Reply#ofp_table_features_reply.body,
   ofp_table_features_request_filter_processtable(SwitchId, ProcessTableId, TableFeaturesList).
 
@@ -1136,10 +1139,10 @@ ofp_table_features_request_filter_processtable(SwitchId, ProcessTableId, [TableF
         P =/= false
       ],
       % get tableid from switchid
-      TableId = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, tableid),
+      TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
       % build table features
       TableFeatures#ofp_table_features{
-        table_id = TableId,
+        table_id = TVSwitch#tv_switch.tableid,
         metadata_match = MetadataMatch,
         metadata_write = MetadataWrite,
         properties = Properties
@@ -1158,19 +1161,31 @@ ofp_table_features_request_rewrite_properties(_SwitchId, Property)
   Property;
 ofp_table_features_request_rewrite_properties(SwitchId, Property)
   when is_record(Property, ofp_table_feature_prop_next_tables) ->
-  OutportMap = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, outportmap),
-  NextSwitches = [NextSwitchId || {NextSwitchId, _EgressPort} <- OutportMap],
-  NextTables = [tablevisor_ctrl4:tablevisor_switch_get({switchid, NextSwitchId}, tableid) || NextSwitchId <- NextSwitches],
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+  NextSwitches = [NextSwitchId || {NextSwitchId, _EgressPort} <- TVSwitch#tv_switch.outportmap],
+  NextTables = [
+    begin
+      NextTVSwitch = tablevisor_ctrl4:tablevisor_switch_get(NextSwitchId),
+      NextTVSwitch#tv_switch.switchid
+    end
+    || NextSwitchId <- NextSwitches
+  ],
   Property2 = Property#ofp_table_feature_prop_next_tables{next_table_ids = NextTables},
-  lager:debug("Table ~p, Outportmap ~p, Nexttables ~p", [SwitchId, OutportMap, NextTables]),
+  lager:debug("Table ~p, Outportmap ~p, Nexttables ~p", [SwitchId, TVSwitch#tv_switch.outportmap, NextTables]),
   Property2;
 ofp_table_features_request_rewrite_properties(SwitchId, Property)
   when is_record(Property, ofp_table_feature_prop_next_tables_miss) ->
-  OutportMap = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, outportmap),
-  NextSwitches = [NextSwitchId || {NextSwitchId, _EgressPort} <- OutportMap],
-  NextTables = [tablevisor_ctrl4:tablevisor_switch_get({switchid, NextSwitchId}, tableid) || NextSwitchId <- NextSwitches],
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
+  NextSwitches = [NextSwitchId || {NextSwitchId, _EgressPort} <- TVSwitch#tv_switch.outportmap],
+  NextTables = [
+    begin
+      NextTVSwitch = tablevisor_ctrl4:tablevisor_switch_get(NextSwitchId),
+      NextTVSwitch#tv_switch.switchid
+    end
+    || NextSwitchId <- NextSwitches
+  ],
   Property2 = Property#ofp_table_feature_prop_next_tables_miss{next_table_ids = NextTables},
-  lager:debug("Table ~p, Outportmap ~p, Nexttables ~p", [SwitchId, OutportMap, NextTables]),
+  lager:debug("Table ~p, Outportmap ~p, Nexttables ~p", [SwitchId, TVSwitch#tv_switch.outportmap, NextTables]),
   Property2;
 ofp_table_features_request_rewrite_properties(_SwitchId, Property)
   when is_record(Property, ofp_table_feature_prop_write_actions) ->
@@ -1284,7 +1299,7 @@ ofp_group_features_request(State,
 %%%-----------------------------------------------------------------------------
 
 tablevisor_init_connection(SwitchId) ->
-  FlowMods = tablevisor_ctrl4:tablevisor_switch_get({switchid, SwitchId}, flowmods),
+  TVSwitch = tablevisor_ctrl4:tablevisor_switch_get(SwitchId),
   % create instructions + actions
   CreateInstructions = fun(Actions) ->
     FunR = fun([], InstructionList, _) ->
@@ -1372,50 +1387,22 @@ tablevisor_init_connection(SwitchId) ->
     Message = tablevisor_ctrl4:message(FlowMod),
     tablevisor_ctrl4:send(SwitchId, Message)
                 end,
-  [SendFlowMod(FlowModConfig) || FlowModConfig <- FlowMods].
+  [SendFlowMod(FlowModConfig) || FlowModConfig <- TVSwitch#tv_switch.flowmods],
+  % initialize goto table flow mods (implemented via metadata)
+  tablevisor_init_gototable_flows(SwitchId).
 
-%% tablevisor_flow_add_backline(TableId) ->
-%%   case TableId of
-%%     0 ->
-%%       ExtractMapPerTable = fun(TableId2) ->
-%%         BackLineMap = tablevisor_ctrl4:tablevisor_switch_get(TableId2, backlinemap),
-%%         [{DstPort, OriginPort} || {OriginPort, _SrcPort, DstPort} <- BackLineMap]
-%%       end,
-%%       TableList = tablevisor_ctrl4:tablevisor_tables(),
-%%       List1 = [ExtractMapPerTable(TableId2) || TableId2 <- TableList],
-%%       List2 = lists:flatten(List1),
-%%       SendFlowMod = fun(DstPort, OriginPort) ->
-%%         FlowMod = #ofp_flow_mod{
-%%           table_id = 200,
-%%           command = add,
-%%           hard_timeout = 0,
-%%           idle_timeout = 0,
-%%           priority = 100,
-%%           flags = [send_flow_rem],
-%%           match = #ofp_match{fields = [#ofp_field{name = in_port, value = <<DstPort>>}]},
-%%           instructions = [
-%%             #ofp_instruction_apply_actions{actions = [#ofp_action_output{port = OriginPort}]}
-%%           ]
-%%         },
-%%         Message = tablevisor_ctrl4:message(FlowMod),
-%%         tablevisor_ctrl4:send(TableId, Message)
-%%       end,
-%%       [SendFlowMod(DstPort, OriginPort) || {DstPort, OriginPort} <- List2],
-%%       true;
-%%     _ ->
-%%       false
-%%   end.
+-spec tablevisor_init_gototable_flows(integer()) ->
+  false.
+tablevisor_init_gototable_flows(_SwitchId) ->
+  false.
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list
-  case RequestedTable of
-    all ->
-      %lager:info("Table all"),
-      RequestedTableList = tablevisor_ctrl4:tablevisor_tables();
-    _ ->
-      %lager:info("Table ~p", [RequestedTable]),
-      RequestedTableList = [RequestedTable]
-  end,
+  RequestedTableList =
+    case RequestedTable of
+      all -> tablevisor_ctrl4:tablevisor_tables();
+      _ -> [RequestedTable]
+    end,
   % start sender process
   spawn(fun() ->
     ttpsim_transmit(RequestedTableList, Request)
