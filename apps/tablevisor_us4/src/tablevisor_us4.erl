@@ -122,6 +122,12 @@ start(BackendOpts) ->
     tablevisor_ctrl4:tablevisor_wait_for_switches(),
     tablevisor_ctrl4:tablevisor_topology_discovery(),
     tablevisor_ctrl4:tablevisor_identify_table_position(),
+    SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
+    % initialize goto table flow mods (implemented via metadata)
+    case ets:lookup_element(tablevisor_config, skip_tables_via_metadata, 2) of
+      true -> [tablevisor_init_gototable_flows(TVSwitch) || TVSwitch <- SwitchList];
+      _ -> true
+    end,
     lager:info("Waiting finished. Now initialize the switch and connect to external controller."),
     tablevisor_log("~sStart switch endpoint and connect to external controller", [tvlc(red)]),
     BufferState = linc_buffer:initialize(SwitchId),
@@ -179,18 +185,21 @@ tablevisor_read_config(_SwitchId, Config) ->
   % read TableVisor config from sys.config
   ets:new(tablevisor_config, [public, named_table, {read_concurrency, true}]),
   {tablevisor_config, TVConfig} = lists:keyfind(tablevisor_config, 1, Switch),
+  % metadata provider
   case lists:keyfind(metadata_provider, 1, TVConfig) of
-    {metadata_provider, srcmac} ->
-      ets:insert(tablevisor_config, {metadata_provider, srcmac}),
+    {metadata_provider, srcmac} -> ets:insert(tablevisor_config, {metadata_provider, srcmac}),
       lager:info("Set metadata provider: Source MAC address.");
-    {metadata_provider, dstmac} ->
-      ets:insert(tablevisor_config, {metadata_provider, dstmac}),
+    {metadata_provider, dstmac} -> ets:insert(tablevisor_config, {metadata_provider, dstmac}),
       lager:info("Set metadata provider: Destination MAC address.");
-    {metadata_provider, vid} ->
-      ets:insert(tablevisor_config, {metadata_provider, vid}),
+    {metadata_provider, vid} -> ets:insert(tablevisor_config, {metadata_provider, vid}),
       lager:info("Set metadata provider: VLAN-ID.");
-    false ->
+    _ ->
       false
+  end,
+  % skip tables via metadata
+  case lists:keyfind(skip_tables_via_metadata, 1, TVConfig) of
+    {skip_tables_via_metadata, true} -> ets:insert(tablevisor_config, {skip_tables_via_metadata, true});
+    _ -> ets:insert(tablevisor_config, {skip_tables_via_metadata, false})
   end.
 
 tablevisor_create_switch_config(Switch) ->
@@ -297,7 +306,8 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
       false ->
         % get first (and only) goto-table-action-instruction
         [GotoTableInstruction | _] = GotoTableInstructionList,
-        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, GotoTableInstruction#ofp_instruction_goto_table.table_id),
+        DstSwitch = tablevisor_ctrl4:tablevisor_switch_get(GotoTableInstruction#ofp_instruction_goto_table.table_id, tableid),
+        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, DstSwitch#tv_switch.switchid),
         FinalInstructionList =
           case is_integer(Outport) of
             false ->
@@ -1390,14 +1400,51 @@ tablevisor_init_connection(SwitchId) ->
     Message = tablevisor_ctrl4:message(FlowMod),
     tablevisor_ctrl4:send(SwitchId, Message)
                 end,
-  [SendFlowMod(FlowModConfig) || FlowModConfig <- TVSwitch#tv_switch.flowmods],
-  % initialize goto table flow mods (implemented via metadata)
-  tablevisor_init_gototable_flows(SwitchId).
+  [SendFlowMod(FlowModConfig) || FlowModConfig <- TVSwitch#tv_switch.flowmods].
 
 -spec tablevisor_init_gototable_flows(integer()) ->
-  false.
-tablevisor_init_gototable_flows(_SwitchId) ->
-  false.
+  true.
+tablevisor_init_gototable_flows(TVSwitch) ->
+  % get list of all switches
+  SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
+  % filter switches to only add a flow mod to tables with table id gereater then mine
+  NextSwitchList = lists:filter(
+    fun(NextSwitch) ->
+      if
+        (TVSwitch#tv_switch.tableid < NextSwitch#tv_switch.tableid) -> true;
+        true -> false
+      end
+    end, SwitchList),
+  % generate flow mod
+  FlowModList = [
+    begin
+      #ofp_flow_mod{
+        table_id = TVSwitch#tv_switch.tableid,
+        command = add,
+        hard_timeout = 0,
+        idle_timeout = 0,
+        priority = 254,
+        flags = [send_flow_rem],
+        match = #ofp_match{fields = [
+          #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.tableid):64>>, mask = <<255:64>>}
+        ]},
+        instructions = [
+          #ofp_instruction_goto_table{table_id = NextSwitch#tv_switch.tableid}
+        ]
+      }
+    end
+    || NextSwitch <- NextSwitchList
+  ],
+  lager:debug("Skip Table FlowMods for Switch ~p: ~p", [TVSwitch#tv_switch.switchid, FlowModList]),
+  % set flow mod to switch (with metadata postprocessing)
+  [
+    begin
+      State = #state{},
+      ofp_flow_mod(State, FlowMod)
+    end
+    || FlowMod <- FlowModList
+  ],
+  true.
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list

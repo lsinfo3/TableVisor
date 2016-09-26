@@ -316,9 +316,11 @@ tablevisor_tables() ->
   Switches = tablevisor_switch_get(),
   [TVSwitch#tv_switch.tableid || TVSwitch <- Switches].
 
-tablevisor_switch_get_outport(SrcSwitchId, DstTableId) ->
+-spec tablevisor_switch_get_outport(integer(), integer()) ->
+  integer().
+tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) ->
   SrcSwitch = tablevisor_switch_get(SrcSwitchId),
-  DstSwitch = tablevisor_switch_get(DstTableId, tableid),
+  DstSwitch = tablevisor_switch_get(DstSwitchId),
   Result = lists:keyfind(DstSwitch#tv_switch.switchid, 1, SrcSwitch#tv_switch.outportmap),
   case Result of
     {_DstSwitchId, Outport} ->
