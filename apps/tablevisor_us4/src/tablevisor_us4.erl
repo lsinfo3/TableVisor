@@ -293,57 +293,9 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
   lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
-  SwitchList = [ofp_flow_mod_get_switch(FlowMod)],
-  % anonymous function to generate flow mod
-  RefactorFlowMod = fun(TVSwitch, FlowMod2) ->
-    % extract apply-action-instructions from all instructions
-    GotoTableInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
-    case GotoTableInstructionList == [] of
-      true ->
-        % there are no goto-table-instructions -> leave untouched
-        FinalInstructionList = FlowMod2#ofp_flow_mod.instructions,
-        DevTableId = TVSwitch#tv_switch.processtable;
-      false ->
-        % get first (and only) goto-table-action-instruction
-        [GotoTableInstruction | _] = GotoTableInstructionList,
-        DstSwitch = tablevisor_ctrl4:tablevisor_switch_get(GotoTableInstruction#ofp_instruction_goto_table.table_id, tableid),
-        Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, DstSwitch#tv_switch.switchid),
-        FinalInstructionList =
-          case is_integer(Outport) of
-            false ->
-              % there is no output port for goto-table defined -> leave untouched
-              FlowMod2#ofp_flow_mod.instructions;
-            true ->
-              % extract apply-action-instructions from instructions
-              ApplyActionInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, is_record(I, ofp_instruction_apply_actions)],
-              case ApplyActionInstructionList == [] of
-                true ->
-                  % no apply-action-instruction -> create new apply-action-instruction
-                  ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
-                false ->
-                  % the the first (and only) apply-action-instruction
-                  [ApplyActionInstruction | _] = ApplyActionInstructionList
-              end,
-              % create output action and append it to apply-action-instruction
-              OutputAction = #ofp_action_output{port = Outport},
-              % filter all apply-actions from instructions
-              % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
-              FilteredInstructionList = [I || I <- FlowMod2#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
-              % filter all output-actions form apply-actions
-              FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
-              % create final instruction by filtered instructions without goto-table-instruction
-              %    + refactored apply-action-instruction
-              FilteredInstructionList ++ [FinalApplyActionInstruction]
-          end,
-        %lager:info("FinalInstructionList ~p", [FinalInstructionList]),
-        % read device table id
-        DevTableId = TVSwitch#tv_switch.processtable
-    end,
-    % insert instructions into flow entry and replace tableid
-    FlowMod2#ofp_flow_mod{table_id = DevTableId, instructions = FinalInstructionList}
-                    end,
+  TVSwitch = ofp_flow_mod_get_switch(FlowMod),
   % build requests
-  Requests = [{TVSwitch#tv_switch.switchid, RefactorFlowMod(TVSwitch, FlowMod)} || TVSwitch <- SwitchList],
+  Requests = [{TVSwitch#tv_switch.switchid, ofp_flow_mod_refactor_hasgototable(FlowMod, TVSwitch)}],
   % build requests by applying matadata to mac matching
   MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
   case MetadataProvider of
@@ -365,6 +317,81 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % send requests and receives replies
   tablevisor_ctrl4:tablevisor_multi_request(Requests2),
   {noreply, State}.
+
+-spec ofp_flow_mod_refactor_hasgototable(ofp_flow_mod(), #tv_switch{}) ->
+  #ofp_flow_mod{}.
+ofp_flow_mod_refactor_hasgototable(FlowMod, TVSwitch) ->
+  GotoTableInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
+  % insert process table id
+  FlowMod2 = ofp_flow_mod_inject_tableid(FlowMod, TVSwitch#tv_switch.processtable),
+  case GotoTableInstructionList of
+    [] ->
+      % there are no goto table instructions -> insert table id and return
+      FlowMod2;
+    _ ->
+      % there are goto table instructions -> replace them by output actions
+      ofp_flow_mod_refactor_output_by_connection(FlowMod2, TVSwitch)
+  end.
+
+-spec ofp_flow_mod_refactor_output_by_connection(ofp_flow_mod(), #tv_switch{}) ->
+  #ofp_flow_mod{}.
+ofp_flow_mod_refactor_output_by_connection(FlowMod, TVSwitch) ->
+  GotoTableInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
+  % extract goto-table-action-instruction
+  [GotoTableInstruction | _] = GotoTableInstructionList,
+  % get destination switch for flow mod by table id
+  DstSwitch = tablevisor_ctrl4:tablevisor_switch_get(GotoTableInstruction#ofp_instruction_goto_table.table_id, tableid),
+  % try to get outport for target table
+  Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch#tv_switch.switchid, DstSwitch#tv_switch.switchid),
+  case is_integer(Outport) of
+    true ->
+      ofp_flow_mod_inject_output(FlowMod, Outport);
+    _ ->
+      ofp_flow_mod_refactor_output_by_metadata(FlowMod, TVSwitch)
+  end.
+
+-spec ofp_flow_mod_refactor_output_by_metadata(ofp_flow_mod(), #tv_switch{}) ->
+  #ofp_flow_mod{}.
+ofp_flow_mod_refactor_output_by_metadata(FlowMod, TVSwitch) ->
+  % try to get outport for target table
+  Outport = tablevisor_ctrl4:tablevisor_switch_get_outport_next(TVSwitch),
+  case is_integer(Outport) of
+    true ->
+      ofp_flow_mod_inject_output(FlowMod, Outport);
+    _ ->
+      FlowMod
+  end.
+
+-spec ofp_flow_mod_inject_tableid(ofp_flow_mod(), integer()) ->
+  #ofp_flow_mod{}.
+ofp_flow_mod_inject_tableid(#ofp_flow_mod{} = FlowMod, TableId) ->
+  FlowMod#ofp_flow_mod{table_id = TableId}.
+
+-spec ofp_flow_mod_inject_output(ofp_flow_mod(), integer()) ->
+  #ofp_flow_mod{}.
+ofp_flow_mod_inject_output(#ofp_flow_mod{} = FlowMod, Outport) ->
+  % extract apply-action-instructions from instructions
+  ApplyActionInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, is_record(I, ofp_instruction_apply_actions)],
+  case ApplyActionInstructionList == [] of
+    true ->
+      % no apply-action-instruction -> create new apply-action-instruction
+      ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
+    false ->
+      % the the first (and only) apply-action-instruction
+      [ApplyActionInstruction | _] = ApplyActionInstructionList
+  end,
+  % create output action and append it to apply-action-instruction
+  OutputAction = #ofp_action_output{port = Outport},
+  % filter all apply-actions from instructions
+  % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
+  FilteredInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
+  % filter all output-actions form apply-actions
+  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
+  % create final instruction by filtered instructions without goto-table-instruction
+  %    + refactored apply-action-instruction
+  FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction],
+% insert instructions into flow entry
+  FlowMod#ofp_flow_mod{instructions = FinalInstructionList}.
 
 -spec ofp_flow_mod_get_switch(ofp_flow_mod()) ->
   integer().

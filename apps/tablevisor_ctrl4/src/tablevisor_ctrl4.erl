@@ -30,6 +30,7 @@
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
+  tablevisor_switch_get_outport_next/1,
   tablevisor_wait_for_switches/0,
   tablevisor_topology_discovery/0,
   tablevisor_multi_request/1,
@@ -329,6 +330,20 @@ tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) ->
       false
   end.
 
+-spec tablevisor_switch_get_outport_next(integer() | #tv_switch{}) ->
+  #tv_switch{} | false.
+tablevisor_switch_get_outport_next(SwitchId) when is_integer(SwitchId) ->
+  TVSwitch = tablevisor_switch_get(SwitchId),
+  tablevisor_switch_get_outport_next(TVSwitch);
+tablevisor_switch_get_outport_next(#tv_switch{} = TVSwitch) ->
+  OutportMap = lists:keysort(1, TVSwitch#tv_switch.outportmap),
+  case OutportMap of
+    [{_SwitchId, Outport} | _] -> Outport;
+    _ -> false
+  end.
+
+-spec tablevisor_switch_get_gototable(integer(), integer()) ->
+  integer().
 tablevisor_switch_get_gototable(SrcSwitchId, OutPort) ->
   TVSwitch = tablevisor_switch_get(SrcSwitchId),
   DstSwitches = [D
