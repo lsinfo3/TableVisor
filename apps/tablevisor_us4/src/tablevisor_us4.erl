@@ -293,7 +293,7 @@ ofp_features_request(#state{switch_id = SwitchId,
   {reply, ofp_message(), #state{}}.
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
   LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
-  tablevisor_log("~sReceived ~sflow-mod~s from controller:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), LogFlow1]),
+  tablevisor_log("~sReceived ~sflow-mod~s from controller for table ~w:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), TableId, LogFlow1]),
   lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
   % get table id list
   TVSwitch = ofp_flow_mod_get_switch(FlowMod),
@@ -308,7 +308,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % log
   [begin
      LogFlow = tablevisor_logformat_flowmod(FlowModL),
-     tablevisor_log("~sSend ~sflow-mod~s to switch with table ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), SwitchId, LogFlow])
+     tablevisor_log("~sSend ~sflow-mod~s to switch ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), SwitchId, LogFlow])
    end
     || {SwitchId, FlowModL} <- Requests],
   % send requests and receives replies
@@ -420,22 +420,18 @@ ofp_flow_mod_metadata_preprocess(#ofp_flow_mod{} = FlowMod1, #tv_switch{} = TVSw
 
 -spec ofp_flow_mod_metadata_postprocess(ofp_flow_mod(), #tv_switch{}) ->
   #ofp_flow_mod{}.
-ofp_flow_mod_metadata_postprocess(#ofp_flow_mod{} = FlowMod1, #tv_switch{} = _TVSwitch) ->
+ofp_flow_mod_metadata_postprocess(#ofp_flow_mod{} = FlowMod, #tv_switch{} = _TVSwitch) ->
   TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
   % apply write metatdata
-  {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod1#ofp_flow_mod.instructions),
-  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, TVConfig#tv_config.metadata_provider, MetadataWrite),
-  FlowMod2 = FlowMod1#ofp_flow_mod{
-    instructions = NewInstructions
-  },
+  {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod#ofp_flow_mod.instructions),
   % apply metadata match
-  {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod2#ofp_flow_mod.match#ofp_match.fields),
+  {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod#ofp_flow_mod.match#ofp_match.fields),
   NewMatches = metadata_add_metadata_provider_match(OtherMatches, TVConfig#tv_config.metadata_provider, MetadataMatch),
-  FlowMod3 = FlowMod2#ofp_flow_mod{
-    match = #ofp_match{fields = NewMatches}
-  },
-  % return refactored flow mod
-  FlowMod3.
+  % create refactored flow mod
+  FlowMod#ofp_flow_mod{
+    match = #ofp_match{fields = NewMatches},
+    instructions = metadata_add_metadata_provider_apply(OtherInstructions, TVConfig#tv_config.metadata_provider, MetadataWrite)
+  }.
 
 metatdata_apply_tableposition_action(Provider, Position, FlowMod) ->
   case Position of
@@ -508,20 +504,20 @@ metadata_add_metadata_provider_apply(InstructionList, _Provider, false) ->
 metadata_add_metadata_provider_apply(InstructionList, srcmac, MetadataWrite) ->
   InstructionList2 = flow_instruction_del_apply_action_setfield(InstructionList, eth_src),
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
-  <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = MetadataValue, has_mask = true, mask = MetadataMask}},
+  <<_:16, _MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = MetadataValue, has_mask = false, mask = <<0:48>>}},
   flow_instruction_add_apply_action(InstructionList2, NewSetField);
 metadata_add_metadata_provider_apply(InstructionList, dstmac, MetadataWrite) ->
   InstructionList2 = flow_instruction_del_apply_action_setfield(InstructionList, eth_dst),
   <<_:16, MetadataValue/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
-  <<_:16, MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = MetadataValue, has_mask = true, mask = MetadataMask}},
+  <<_:16, _MetadataMask/binary>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = MetadataValue, has_mask = false, mask = <<0:48>>}},
   flow_instruction_add_apply_action(InstructionList2, NewSetField);
 metadata_add_metadata_provider_apply(InstructionList, vid, MetadataWrite) ->
   InstructionList2 = flow_instruction_del_apply_action_setfield(InstructionList, vlan_vid),
   <<_:52, MetadataValue:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata,
-  <<_:52, MetadataMask:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = true, mask = <<(MetadataMask + 16#1000):13>>}},
+  <<_:52, _MetadataMask:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = false}},
   flow_instruction_add_apply_action(InstructionList2, NewSetField).
 
 -spec flow_instruction_add_output([ofp_instruction()], integer()) ->
@@ -553,7 +549,7 @@ flow_instruction_add_output(InstructionList, Outport) ->
 flow_instruction_add_apply_action(InstructionList1, NewAction) ->
   % get instruction for apply actions
   ApplyInstructionList = [Instruction || Instruction <- InstructionList1,
-    is_record(InstructionList1, ofp_instruction_apply_actions)],
+    is_record(Instruction, ofp_instruction_apply_actions)],
   % get apply action list
   ApplyInstruction1 =
     case ApplyInstructionList of
@@ -566,7 +562,7 @@ flow_instruction_add_apply_action(InstructionList1, NewAction) ->
   },
   % remove apply actions
   InstructionList2 = [Instruction || Instruction <- InstructionList1,
-    not(is_record(InstructionList1, ofp_instruction_apply_actions))],
+    not(is_record(Instruction, ofp_instruction_apply_actions))],
   % add refactored apply action
   InstructionList3 = InstructionList2 ++ [ApplyInstruction2],
   % return refactored instruction list
@@ -599,12 +595,41 @@ flow_instruction_del_apply_action_setfield(InstructionList, FieldName) ->
     end,
   [InstructionFilter(I) || I <- InstructionList].
 
+-spec flow_instruction_del_pushvlan([ofp_instruction()]) ->
+  [ofp_instruction()].
+flow_instruction_del_pushvlan(InstructionList) ->
+  ActionFilter =
+    fun(Field) ->
+      case Field of
+        #ofp_action_push_vlan{} ->
+          nil;
+        _ ->
+          Field
+      end
+    end,
+  InstructionFilter =
+    fun
+      (#ofp_instruction_apply_actions{} = Instruction) ->
+        Instruction#ofp_instruction_apply_actions{
+          actions = [
+            A || A <- [
+              ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
+            ], A /= nil
+          ]
+        };
+      (Instruction) ->
+        Instruction
+    end,
+  [InstructionFilter(I) || I <- InstructionList].
+
+
 -spec flow_instruction_add_write_metadata([ofp_instruction()], bitstring(), bitstring() | false) ->
   [ofp_instruction()].
 flow_instruction_add_write_metadata(InstructionList1, Metadata, Mask) ->
   % create metadata instruction
   MetadataInstruction = #ofp_instruction_write_metadata{
-    metadata = <<Metadata:64>>, metadata_mask = <<Mask:64>>
+    metadata = <<Metadata:64>>,
+    metadata_mask = <<Mask:64>>
   },
   % remove write metadata instruction
   InstructionList2 = [Instruction || Instruction <- InstructionList1,
@@ -644,31 +669,6 @@ metadata_add_metadata_provider_match(OtherMatches1, vid, MetadataMatch) ->
   TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = MetadataMatch#ofp_field.has_mask, mask = <<(MetadataMask + 16#1000):13>>},
   OtherMatches2 ++ [TranslatedMatch].
 
-remove_instruction_pushvlan(InstructionList) ->
-  ActionFilter =
-    fun(Field) ->
-      case Field of
-        #ofp_action_push_vlan{} ->
-          nil;
-        _ ->
-          Field
-      end
-    end,
-  InstructionFilter =
-    fun
-      (#ofp_instruction_apply_actions{} = Instruction) ->
-        Instruction#ofp_instruction_apply_actions{
-          actions = [
-            A || A <- [
-              ActionFilter(A) || A <- Instruction#ofp_instruction_apply_actions.actions
-            ], A /= nil
-          ]
-        };
-      (Instruction) ->
-        Instruction
-    end,
-  [InstructionFilter(I) || I <- InstructionList].
-
 % remove flowmod set mac address action
 -spec metadata_remove_instruction_setfield(atom(), [ofp_instruction()])
       -> {[ofp_instruction()]}.
@@ -677,7 +677,7 @@ metadata_remove_instruction_setfield(srcmac, InstructionList) ->
 metadata_remove_instruction_setfield(dstmac, InstructionList) ->
   flow_instruction_del_apply_action_setfield(InstructionList, eth_dst);
 metadata_remove_instruction_setfield(vid, InstructionList) ->
-  remove_instruction_pushvlan(
+  flow_instruction_del_pushvlan(
     flow_instruction_del_apply_action_setfield(InstructionList, vlan_vid)
   ).
 
@@ -1493,7 +1493,7 @@ tablevisor_init_gototable_flows(TVSwitch) ->
         command = add,
         hard_timeout = 0,
         idle_timeout = 0,
-        priority = 255,
+        priority = 254,
         flags = [send_flow_rem],
         match = #ofp_match{fields = [
           #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.tableid):64>>, mask = <<255:64>>, has_mask = true}
