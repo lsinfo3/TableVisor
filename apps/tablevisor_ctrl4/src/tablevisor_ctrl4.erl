@@ -30,7 +30,7 @@
   tablevisor_switch_get/2,
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
-  tablevisor_switch_get_outport_next/1,
+  tablevisor_switch_get_next/1,
   tablevisor_wait_for_switches/0,
   tablevisor_topology_discovery/0,
   tablevisor_multi_request/1,
@@ -317,11 +317,13 @@ tablevisor_tables() ->
   Switches = tablevisor_switch_get(),
   [TVSwitch#tv_switch.tableid || TVSwitch <- Switches].
 
--spec tablevisor_switch_get_outport(integer(), integer()) ->
+-spec tablevisor_switch_get_outport(integer() | #tv_switch{}, integer() | #tv_switch{}) ->
   integer().
-tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) ->
+tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) when is_integer(SrcSwitchId) and is_integer(DstSwitchId) ->
   SrcSwitch = tablevisor_switch_get(SrcSwitchId),
   DstSwitch = tablevisor_switch_get(DstSwitchId),
+  tablevisor_switch_get_outport(SrcSwitch, DstSwitch);
+tablevisor_switch_get_outport(#tv_switch{} = SrcSwitch, #tv_switch{} = DstSwitch) ->
   Result = lists:keyfind(DstSwitch#tv_switch.switchid, 1, SrcSwitch#tv_switch.outportmap),
   case Result of
     {_DstSwitchId, Outport} ->
@@ -330,16 +332,29 @@ tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) ->
       false
   end.
 
--spec tablevisor_switch_get_outport_next(integer() | #tv_switch{}) ->
+-spec tablevisor_switch_get_next(integer() | #tv_switch{}) ->
   #tv_switch{} | false.
-tablevisor_switch_get_outport_next(SwitchId) when is_integer(SwitchId) ->
+tablevisor_switch_get_next(SwitchId) when is_integer(SwitchId) ->
   TVSwitch = tablevisor_switch_get(SwitchId),
-  tablevisor_switch_get_outport_next(TVSwitch);
-tablevisor_switch_get_outport_next(#tv_switch{} = TVSwitch) ->
-  OutportMap = lists:keysort(1, TVSwitch#tv_switch.outportmap),
-  case OutportMap of
-    [{_SwitchId, Outport} | _] -> Outport;
-    _ -> false
+  tablevisor_switch_get_next(TVSwitch);
+tablevisor_switch_get_next(#tv_switch{} = TVSwitch) ->
+  SwitchList = tablevisor_switch_get(),
+  WeightCalculator =
+    fun(#tv_switch{} = Switch) ->
+      Switch#tv_switch.tableid * 16#FF + lists:nth(1, Switch#tv_switch.priority)
+    end,
+  MyWeight = WeightCalculator(TVSwitch),
+  WeightedSwitchList = [
+    {Switch, WeightCalculator(Switch)}
+    || Switch <- SwitchList
+  ],
+  SortedList = lists:keysort(2, WeightedSwitchList),
+  SubsequentSwitchList = [
+    Switch || {Switch, Weight} <- SortedList, Weight > MyWeight
+  ],
+  case SubsequentSwitchList of
+    [] -> false;
+    [NextSwitch | _] -> NextSwitch
   end.
 
 -spec tablevisor_switch_get_gototable(integer(), integer()) ->
