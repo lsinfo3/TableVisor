@@ -32,11 +32,12 @@
   tablevisor_switch_get_outport/2,
   tablevisor_switch_get_gototable/2,
   tablevisor_switch_get_next/1,
+  tablevisor_switch_get_nextlist/1,
   tablevisor_wait_for_switches/0,
   tablevisor_topology_discovery/0,
   tablevisor_multi_request/1,
   tablevisor_multi_request/2,
-  tablevisor_identify_table_position/0
+  tablevisor_identify_switch_position/0
 ]).
 
 
@@ -325,8 +326,10 @@ tablevisor_tables() ->
   Switches = tablevisor_switch_get(),
   [TVSwitch#tv_switch.tableid || TVSwitch <- Switches].
 
--spec tablevisor_switch_get_outport(integer() | #tv_switch{}, integer() | #tv_switch{}) ->
+-spec tablevisor_switch_get_outport(integer() | #tv_switch{}, integer() | #tv_switch{} | false) ->
   integer().
+tablevisor_switch_get_outport(_, false) ->
+  false;
 tablevisor_switch_get_outport(SrcSwitchId, DstSwitchId) when is_integer(SrcSwitchId) and is_integer(DstSwitchId) ->
   SrcSwitch = tablevisor_switch_get(SrcSwitchId),
   DstSwitch = tablevisor_switch_get(DstSwitchId),
@@ -340,26 +343,27 @@ tablevisor_switch_get_outport(#tv_switch{} = SrcSwitch, #tv_switch{} = DstSwitch
       false
   end.
 
+-spec tablevisor_switch_get_nextlist(integer() | #tv_switch{}) ->
+  [#tv_switch{}] | false.
+tablevisor_switch_get_nextlist(SwitchId) when is_integer(SwitchId) ->
+  TVSwitch = tablevisor_switch_get(SwitchId),
+  tablevisor_switch_get_nextlist(TVSwitch);
+tablevisor_switch_get_nextlist(#tv_switch{} = TVSwitch) ->
+  SwitchList = tablevisor_switch_get(),
+  SubsequentSwitchList = [
+    OtherSwitch
+    || OtherSwitch <- SwitchList,
+    OtherSwitch#tv_switch.weight > TVSwitch#tv_switch.weight
+  ],
+  SubsequentSwitchList.
+
 -spec tablevisor_switch_get_next(integer() | #tv_switch{}) ->
   #tv_switch{} | false.
 tablevisor_switch_get_next(SwitchId) when is_integer(SwitchId) ->
   TVSwitch = tablevisor_switch_get(SwitchId),
   tablevisor_switch_get_next(TVSwitch);
 tablevisor_switch_get_next(#tv_switch{} = TVSwitch) ->
-  SwitchList = tablevisor_switch_get(),
-  WeightCalculator =
-    fun(#tv_switch{} = Switch) ->
-      Switch#tv_switch.tableid * 16#FF + lists:nth(1, Switch#tv_switch.priority)
-    end,
-  MyWeight = WeightCalculator(TVSwitch),
-  WeightedSwitchList = [
-    {Switch, WeightCalculator(Switch)}
-    || Switch <- SwitchList
-  ],
-  SortedList = lists:keysort(2, WeightedSwitchList),
-  SubsequentSwitchList = [
-    Switch || {Switch, Weight} <- SortedList, Weight > MyWeight
-  ],
+  SubsequentSwitchList = tablevisor_switch_get_nextlist(TVSwitch),
   case SubsequentSwitchList of
     [] -> false;
     [NextSwitch | _] -> NextSwitch
@@ -615,12 +619,33 @@ tablevisor_digraph_get_edge(_Graph, _V1, _V2, []) ->
 %%% TableVisor Switch/Table Position Identification
 %%%-----------------------------------------------------------------------------
 
-tablevisor_identify_table_position() ->
-  Tables = lists:sort(tablevisor_tables()),
-  [FirstTableId | _] = Tables,
-  [LastTableId | _] = lists:reverse(Tables),
-  FirstSwitch = tablevisor_switch_get(FirstTableId, tableid),
-  LastSwitch = tablevisor_switch_get(LastTableId, tableid),
+tablevisor_identify_switch_position() ->
+  % receive list of all switches
+  SwitchList1 = tablevisor_switch_get(),
+  % calculate switch weights for position
+  WeightCalculator =
+    fun(#tv_switch{} = Switch) ->
+      Switch#tv_switch.tableid * 1000 + (16#FF - lists:nth(1, Switch#tv_switch.priority)) + (16#FF - lists:last(Switch#tv_switch.priority))
+    end,
+  % inject weigth into data structure and persist it
+  SwitchList2 = [
+    begin
+      TVSwitch2 = TVSwitch#tv_switch{weight = WeightCalculator(TVSwitch)},
+      tablevisor_switch_set(TVSwitch2),
+      TVSwitch2
+    end
+    || TVSwitch <- SwitchList1
+  ],
+  % create weighted switch list for sorting purpose
+  WeightedSwitchList = [
+    {TVSwitch, TVSwitch#tv_switch.weight}
+    || TVSwitch <- SwitchList2
+  ],
+  % sort list
+  SortedSwitchList = lists:keysort(2, WeightedSwitchList),
+  % get first and last switch and write position identification
+  {FirstSwitch, _} = lists:nth(1, SortedSwitchList),
+  {LastSwitch, _} = lists:last(SortedSwitchList),
   tablevisor_switch_set(FirstSwitch#tv_switch{position = first}),
   tablevisor_switch_set(LastSwitch#tv_switch{position = last}).
 

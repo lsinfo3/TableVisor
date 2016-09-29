@@ -122,7 +122,7 @@ start(BackendOpts) ->
     % wait for hardware switches
     tablevisor_ctrl4:tablevisor_wait_for_switches(),
     tablevisor_ctrl4:tablevisor_topology_discovery(),
-    tablevisor_ctrl4:tablevisor_identify_table_position(),
+    tablevisor_ctrl4:tablevisor_identify_switch_position(),
     SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
     % initialize goto table flow mods (implemented via metadata)
     case TVConfig#tv_config.skip_tables_via_metadata of
@@ -299,8 +299,10 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   TVSwitch = ofp_flow_mod_get_switch(FlowMod),
   % preprocess metadata
   FlowMod2 = ofp_flow_mod_metadata_preprocess(FlowMod, TVSwitch),
+%%  lager:warning("FlowMod2 ~p", [FlowMod2]),
   % refactor flow mods
   FlowMod3 = ofp_flow_mod_refactor_processgototable(FlowMod2, TVSwitch),
+%%  lager:warning("FlowMod3 ~p", [FlowMod3]),
   % preprocess metadata
   FlowMod4 = ofp_flow_mod_metadata_postprocess(FlowMod3, TVSwitch),
   % build request
@@ -1475,46 +1477,58 @@ tablevisor_init_connection(SwitchId) ->
 -spec tablevisor_init_gototable_flows(integer()) ->
   true.
 tablevisor_init_gototable_flows(TVSwitch) ->
-  % get list of all switches
-  SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
   % filter switches to only add a flow mod to tables with table id gereater then mine
-  NextSwitchList = lists:filter(
-    fun(NextSwitch) ->
-      if
-        (TVSwitch#tv_switch.tableid < NextSwitch#tv_switch.tableid) -> true;
-        true -> false
-      end
-    end, SwitchList),
-  % generate flow mod
-  FlowModList = [
-    begin
-      #ofp_flow_mod{
-        table_id = TVSwitch#tv_switch.tableid,
-        command = add,
-        hard_timeout = 0,
-        idle_timeout = 0,
-        priority = 254,
-        flags = [send_flow_rem],
-        match = #ofp_match{fields = [
-          #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.tableid):64>>, mask = <<255:64>>, has_mask = true}
-        ]},
-        instructions = [
-          #ofp_instruction_goto_table{table_id = NextSwitch#tv_switch.tableid}
-        ]
-      }
-    end
-    || NextSwitch <- NextSwitchList
-  ],
-  lager:debug("Skip Table FlowMods for Switch ~p: ~p", [TVSwitch#tv_switch.switchid, FlowModList]),
-  % set flow mod to switch (with metadata postprocessing)
-  [
-    begin
-      State = #state{},
-      ofp_flow_mod(State, FlowMod)
-    end
-    || FlowMod <- FlowModList
-  ],
-  true.
+  NextSwitchList = tablevisor_ctrl4:tablevisor_switch_get_nextlist(TVSwitch),
+  case NextSwitchList of
+    [] ->
+      true;
+    _ ->
+      SuccessorSwitch = lists:nth(1, NextSwitchList),
+      Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch, SuccessorSwitch),
+      % generate flow mod
+      FlowModList = [
+        begin
+          #ofp_flow_mod{
+            table_id = TVSwitch#tv_switch.tableid,
+            command = add,
+            hard_timeout = 0,
+            idle_timeout = 0,
+            priority = 254,
+            flags = [send_flow_rem],
+            match = #ofp_match{fields = [
+              #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.tableid):64>>, mask = <<255:64>>, has_mask = true}
+            ]},
+            instructions = flow_instruction_add_output([], Outport)
+          }
+        end
+        || NextSwitch <- NextSwitchList,
+        NextSwitch#tv_switch.tableid > TVSwitch#tv_switch.tableid
+      ],
+      ConcatenatingFlowMod =
+        case lists:member(0, TVSwitch#tv_switch.priority) of
+          false ->
+            [#ofp_flow_mod{
+              table_id = TVSwitch#tv_switch.tableid,
+              command = add,
+              hard_timeout = 0,
+              idle_timeout = 0,
+              priority = 0,
+              flags = [send_flow_rem],
+              instructions = flow_instruction_add_output([], Outport)
+            }];
+          _ -> []
+        end,
+      lager:debug("Skip Table FlowMods for Switch ~p: ~p", [TVSwitch#tv_switch.switchid, FlowModList ++ ConcatenatingFlowMod]),
+      % set flow mod to switch (with metadata postprocessing)
+      [
+        begin
+          FlowModPostMeta = ofp_flow_mod_metadata_postprocess(FlowMod, TVSwitch),
+          Requests = [{TVSwitch#tv_switch.switchid, FlowModPostMeta}],
+          tablevisor_ctrl4:tablevisor_multi_request(Requests)
+        end
+        || FlowMod <- FlowModList ++ ConcatenatingFlowMod
+      ]
+  end.
 
 ttpsim_request(RequestedTable, Request) ->
   % reformat requested table from integer or atom all to list

@@ -18,6 +18,7 @@
   socket = false :: any(),
   pid = false :: pid(),
   priority = false :: any(),
+  weight :: integer(),
   position = intermediate :: atom()
 }).
 -type tv_switch() :: #tv_switch{}.
