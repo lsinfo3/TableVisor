@@ -23,6 +23,7 @@
   send/2,
   send/3,
   message/1,
+  tablevisor_config_get/0,
   tablevisor_tables/0,
   tablevisor_switch_set/1,
   tablevisor_switch_get/0,
@@ -310,6 +311,13 @@ tablevisor_switch_set(#tv_switch{switchid = SwitchId} = TVSwitch) ->
     error:badarg ->
       lager:error("Error in tablevisor_switch_set", [SwitchId]),
       false
+  end.
+
+-spec tablevisor_config_get() ->
+  #tv_config{}.
+tablevisor_config_get() ->
+  case ets:lookup_element(tablevisor_config, config, 2) of
+    TVConfig -> TVConfig
   end.
 
 -spec tablevisor_tables() -> true.

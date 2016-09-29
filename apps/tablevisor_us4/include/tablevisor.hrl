@@ -1,4 +1,11 @@
 
+%% TableVisor Configuration
+-record(tv_config, {
+  metadata_provider = false :: false | srcmac | dstmac | vid,
+  skip_tables_via_metadata = false :: boolean()
+}).
+-type tv_config() :: #tv_config{}.
+
 
 %% TableVisor Switch
 -record(tv_switch, {

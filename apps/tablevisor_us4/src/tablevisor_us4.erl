@@ -112,7 +112,8 @@ start(BackendOpts) ->
     {switch_id, SwitchId} = lists:keyfind(switch_id, 1, BackendOpts),
     {datapath_mac, DatapathMac} = lists:keyfind(datapath_mac, 1, BackendOpts),
     {config, Config} = lists:keyfind(config, 1, BackendOpts),
-    tablevisor_read_config(SwitchId, Config),
+    tablevisor_create_config(Config),
+    TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
     tablevsior_preparelog(),
     {ok} = init_controller(6633),
     lager:info("Waiting for Connections from TableVisor Hardware Switches"),
@@ -124,7 +125,7 @@ start(BackendOpts) ->
     tablevisor_ctrl4:tablevisor_identify_table_position(),
     SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
     % initialize goto table flow mods (implemented via metadata)
-    case ets:lookup_element(tablevisor_config, skip_tables_via_metadata, 2) of
+    case TVConfig#tv_config.skip_tables_via_metadata of
       true -> [tablevisor_init_gototable_flows(TVSwitch) || TVSwitch <- SwitchList];
       _ -> true
     end,
@@ -176,31 +177,33 @@ init_controller(Port) ->
 %%% Config + ETS
 %%%-----------------------------------------------------------------------------
 
-tablevisor_read_config(_SwitchId, Config) ->
-  {switch, _SwitchId2, Switch} = lists:keyfind(switch, 1, Config),
+tablevisor_create_config(Config) ->
+  {switch, _SwitchId, Switch} = lists:keyfind(switch, 1, Config),
   {tablevisor_switches, TVSwitches} = lists:keyfind(tablevisor_switches, 1, Switch),
   ets:new(tablevisor_switch, [public, named_table, {read_concurrency, true}]),
   [tablevisor_create_switch_config(Switch2) || Switch2 <- TVSwitches],
   ets:new(tablevisor_socket, [public, named_table, {read_concurrency, true}]),
   % read TableVisor config from sys.config
-  ets:new(tablevisor_config, [public, named_table, {read_concurrency, true}]),
-  {tablevisor_config, TVConfig} = lists:keyfind(tablevisor_config, 1, Switch),
+  {tablevisor_config, ConfigOptions} = lists:keyfind(tablevisor_config, 1, Switch),
   % metadata provider
-  case lists:keyfind(metadata_provider, 1, TVConfig) of
-    {metadata_provider, srcmac} -> ets:insert(tablevisor_config, {metadata_provider, srcmac}),
-      lager:info("Set metadata provider: Source MAC address.");
-    {metadata_provider, dstmac} -> ets:insert(tablevisor_config, {metadata_provider, dstmac}),
-      lager:info("Set metadata provider: Destination MAC address.");
-    {metadata_provider, vid} -> ets:insert(tablevisor_config, {metadata_provider, vid}),
-      lager:info("Set metadata provider: VLAN-ID.");
-    _ ->
-      false
-  end,
+  MetatdataProvider =
+    case lists:keyfind(metadata_provider, 1, ConfigOptions) of
+      {metadata_provider, MetatdataProvider2} -> MetatdataProvider2;
+      _ -> false
+    end,
   % skip tables via metadata
-  case lists:keyfind(skip_tables_via_metadata, 1, TVConfig) of
-    {skip_tables_via_metadata, true} -> ets:insert(tablevisor_config, {skip_tables_via_metadata, true});
-    _ -> ets:insert(tablevisor_config, {skip_tables_via_metadata, false})
-  end.
+  SkipTablesViaMetadata =
+    case lists:keyfind(skip_tables_via_metadata, 1, ConfigOptions) of
+      {skip_tables_via_metadata, SkipTablesViaMetadata2} -> SkipTablesViaMetadata2;
+      _ -> false
+    end,
+  % create TableVisor config and write to database
+  TVConfig = #tv_config{
+    metadata_provider = MetatdataProvider,
+    skip_tables_via_metadata = SkipTablesViaMetadata
+  },
+  ets:new(tablevisor_config, [public, named_table, {read_concurrency, true}]),
+  ets:insert(tablevisor_config, {config, TVConfig}).
 
 tablevisor_create_switch_config(Switch) ->
   {switch, SwitchId, SwitchConfig} = Switch,
@@ -424,29 +427,29 @@ ofp_flow_mod_get_switch(#ofp_flow_mod{table_id = TableId, match = Matches, prior
 -spec ofp_flow_mod_metadata_preprocess(ofp_flow_mod(), #tv_switch{}) ->
   #ofp_flow_mod{}.
 ofp_flow_mod_metadata_preprocess(#ofp_flow_mod{} = FlowMod1, #tv_switch{} = TVSwitch) ->
-  MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
+  TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
   % remove set field
   FlowMod2 = FlowMod1#ofp_flow_mod{
-    instructions = metadata_remove_instruction_setfield(MetadataProvider, FlowMod1#ofp_flow_mod.instructions)
+    instructions = metadata_remove_instruction_setfield(TVConfig#tv_config.metadata_provider, FlowMod1#ofp_flow_mod.instructions)
   },
   % set position specific flow mods
   Position = TVSwitch#tv_switch.position,
-  FlowMod3 = metatdata_apply_tableposition_action(MetadataProvider, Position, FlowMod2),
+  FlowMod3 = metatdata_apply_tableposition_action(TVConfig#tv_config.metadata_provider, Position, FlowMod2),
   FlowMod3.
 
 -spec ofp_flow_mod_metadata_postprocess(ofp_flow_mod(), #tv_switch{}) ->
   #ofp_flow_mod{}.
 ofp_flow_mod_metadata_postprocess(#ofp_flow_mod{} = FlowMod1, #tv_switch{} = _TVSwitch) ->
-  MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
+  TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
   % apply write metatdata
   {MetadataWrite, OtherInstructions} = metadata_split_write(FlowMod1#ofp_flow_mod.instructions),
-  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, MetadataProvider, MetadataWrite),
+  NewInstructions = metadata_add_metadata_provider_apply(OtherInstructions, TVConfig#tv_config.metadata_provider, MetadataWrite),
   FlowMod2 = FlowMod1#ofp_flow_mod{
     instructions = NewInstructions
   },
   % apply metadata match
   {MetadataMatch, OtherMatches} = metadata_split_match(FlowMod2#ofp_flow_mod.match#ofp_match.fields),
-  NewMatches = metadata_add_metadata_provider_match(OtherMatches, MetadataProvider, MetadataMatch),
+  NewMatches = metadata_add_metadata_provider_match(OtherMatches, TVConfig#tv_config.metadata_provider, MetadataMatch),
   FlowMod3 = FlowMod2#ofp_flow_mod{
     match = #ofp_match{fields = NewMatches}
   },
@@ -1196,8 +1199,8 @@ ofp_table_features_request_filter_processtable(SwitchId, ProcessTableId, [TableF
   case TableFeatures#ofp_table_features.table_id of
     ProcessTableId ->
       % metadata
-      MetadataProvider = ets:lookup_element(tablevisor_config, metadata_provider, 2),
-      case MetadataProvider of
+      TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
+      case TVConfig#tv_config.metadata_provider of
         mac ->
           MetadataMatch = <<255, 255, 255, 255, 255, 255, 0, 0>>,
           MetadataWrite = <<255, 255, 255, 255, 255, 255, 0, 0>>;
