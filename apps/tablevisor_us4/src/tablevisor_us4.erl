@@ -342,7 +342,7 @@ ofp_flow_mod_refactor_output_by_connection(FlowMod, TVSwitch) ->
   Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch, DstSwitch),
   case is_integer(Outport) of
     true ->
-      ofp_flow_mod_inject_output(FlowMod, Outport);
+      FlowMod#ofp_flow_mod{instructions = flow_instruction_add_output(FlowMod#ofp_flow_mod.instructions, Outport)};
     _ ->
       ofp_flow_mod_refactor_output_by_metadata(FlowMod, TVSwitch)
   end.
@@ -350,18 +350,25 @@ ofp_flow_mod_refactor_output_by_connection(FlowMod, TVSwitch) ->
 -spec ofp_flow_mod_refactor_output_by_metadata(ofp_flow_mod(), #tv_switch{}) ->
   #ofp_flow_mod{}.
 ofp_flow_mod_refactor_output_by_metadata(FlowMod1, TVSwitch) ->
-  GotoTableInstructionList = [I || I <- FlowMod1#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
-  % extract goto-table-action-instruction
-  [GotoTableInstruction | _] = GotoTableInstructionList,
-  % try to get outport for target table
-  NextSwitch = tablevisor_ctrl4:tablevisor_switch_get_next(TVSwitch),
-  Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch, NextSwitch),
-  case is_integer(Outport) of
+  % check if skip table by metadata is enabled
+  TVConfig = tablevisor_ctrl4:tablevisor_config_get(),
+  case TVConfig#tv_config.skip_tables_via_metadata of
     true ->
-      FlowMod2 = ofp_flow_mod_inject_output(FlowMod1, Outport),
-      FlowMod3 = FlowMod2#ofp_flow_mod{instructions = flow_instruction_add_write_metadata(FlowMod2#ofp_flow_mod.instructions, GotoTableInstruction#ofp_instruction_goto_table.table_id, 16#FF)},
-      FlowMod3;
-    _ ->
+      GotoTableInstructionList = [I || I <- FlowMod1#ofp_flow_mod.instructions, is_record(I, ofp_instruction_goto_table)],
+      % extract goto-table-action-instruction
+      [GotoTableInstruction | _] = GotoTableInstructionList,
+      % try to get outport for target table
+      NextSwitch = tablevisor_ctrl4:tablevisor_switch_get_next(TVSwitch),
+      Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch, NextSwitch),
+      case is_integer(Outport) of
+        true ->
+          FlowMod2 = FlowMod1#ofp_flow_mod{instructions = flow_instruction_add_output(FlowMod1#ofp_flow_mod.instructions, Outport)},
+          FlowMod3 = FlowMod2#ofp_flow_mod{instructions = flow_instruction_add_write_metadata(FlowMod2#ofp_flow_mod.instructions, GotoTableInstruction#ofp_instruction_goto_table.table_id, 16#FF)},
+          FlowMod3;
+        _ ->
+          FlowMod1
+      end;
+    false ->
       FlowMod1
   end.
 
@@ -369,32 +376,6 @@ ofp_flow_mod_refactor_output_by_metadata(FlowMod1, TVSwitch) ->
   #ofp_flow_mod{}.
 ofp_flow_mod_inject_tableid(#ofp_flow_mod{} = FlowMod, TableId) ->
   FlowMod#ofp_flow_mod{table_id = TableId}.
-
--spec ofp_flow_mod_inject_output(ofp_flow_mod(), integer()) ->
-  #ofp_flow_mod{}.
-ofp_flow_mod_inject_output(#ofp_flow_mod{} = FlowMod, Outport) ->
-  % extract apply-action-instructions from instructions
-  ApplyActionInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, is_record(I, ofp_instruction_apply_actions)],
-  case ApplyActionInstructionList == [] of
-    true ->
-      % no apply-action-instruction -> create new apply-action-instruction
-      ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
-    false ->
-      % the the first (and only) apply-action-instruction
-      [ApplyActionInstruction | _] = ApplyActionInstructionList
-  end,
-  % create output action and append it to apply-action-instruction
-  OutputAction = #ofp_action_output{port = Outport},
-  % filter all apply-actions from instructions
-  % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
-  FilteredInstructionList = [I || I <- FlowMod#ofp_flow_mod.instructions, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
-  % filter all output-actions form apply-actions
-  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
-  % create final instruction by filtered instructions without goto-table-instruction
-  %    + refactored apply-action-instruction
-  FinalInstructionList = FilteredInstructionList ++ [FinalApplyActionInstruction],
-% insert instructions into flow entry
-  FlowMod#ofp_flow_mod{instructions = FinalInstructionList}.
 
 -spec ofp_flow_mod_get_switch(ofp_flow_mod()) ->
   integer().
@@ -467,13 +448,13 @@ metatdata_apply_tableposition_action(Provider, Position, FlowMod) ->
   end.
 
 metadata_init_action(srcmac, FlowMod) ->
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0:48>>}},
   NewInstructions = flow_instruction_add_apply_action(FlowMod#ofp_flow_mod.instructions, NewSetField),
   FlowMod#ofp_flow_mod{
     instructions = NewInstructions
   };
 metadata_init_action(dstmac, FlowMod) ->
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0:48>>}},
   NewInstructions = flow_instruction_add_apply_action(FlowMod#ofp_flow_mod.instructions, NewSetField),
   FlowMod#ofp_flow_mod{
     instructions = NewInstructions
@@ -491,13 +472,13 @@ metadata_init_action(vid, FlowMod) ->
   }.
 
 metadata_concluding_action(srcmac, FlowMod) ->
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0, 0, 0, 0, 0, 0>>}},
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_src, value = <<0:48>>}},
   NewInstructions = flow_instruction_add_apply_action(FlowMod#ofp_flow_mod.instructions, NewSetField),
   FlowMod#ofp_flow_mod{
     instructions = NewInstructions
   };
 metadata_concluding_action(dstmac, FlowMod) ->
-  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0, 0, 0, 0, 0, 0>>}},
+  NewSetField = #ofp_action_set_field{field = #ofp_field{name = eth_dst, value = <<0:48>>}},
   NewInstructions = flow_instruction_add_apply_action(FlowMod#ofp_flow_mod.instructions, NewSetField),
   FlowMod#ofp_flow_mod{
     instructions = NewInstructions
@@ -542,6 +523,30 @@ metadata_add_metadata_provider_apply(InstructionList, vid, MetadataWrite) ->
   <<_:52, MetadataMask:12>> = MetadataWrite#ofp_instruction_write_metadata.metadata_mask,
   NewSetField = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = true, mask = <<(MetadataMask + 16#1000):13>>}},
   flow_instruction_add_apply_action(InstructionList2, NewSetField).
+
+-spec flow_instruction_add_output([ofp_instruction()], integer()) ->
+  [ofp_instruction()].
+flow_instruction_add_output(InstructionList, Outport) ->
+  % extract apply-action-instructions from instructions
+  ApplyActionInstructionList = [I || I <- InstructionList, is_record(I, ofp_instruction_apply_actions)],
+  case ApplyActionInstructionList == [] of
+    true ->
+      % no apply-action-instruction -> create new apply-action-instruction
+      ApplyActionInstruction = #ofp_instruction_apply_actions{actions = []};
+    false ->
+      % the the first (and only) apply-action-instruction
+      [ApplyActionInstruction | _] = ApplyActionInstructionList
+  end,
+  % create output action and append it to apply-action-instruction
+  OutputAction = #ofp_action_output{port = Outport},
+  % filter all apply-actions from instructions
+  % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
+  FilteredInstructionList = [I || I <- InstructionList, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
+  % filter all output-actions form apply-actions
+  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
+  % create final instruction by filtered instructions without goto-table-instruction
+  %    + refactored apply-action-instruction
+  FilteredInstructionList ++ [FinalApplyActionInstruction].
 
 -spec flow_instruction_add_apply_action([ofp_instruction()], ofp_action()) ->
   [ofp_instruction()].
