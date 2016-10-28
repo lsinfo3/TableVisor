@@ -305,6 +305,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
 %%  lager:warning("FlowMod3 ~p", [FlowMod3]),
   % preprocess metadata
   FlowMod4 = ofp_flow_mod_metadata_postprocess(FlowMod3, TVSwitch),
+%%  lager:warning("FlowMod4 ~p", [FlowMod3]),
   % build request
   Requests = [{TVSwitch#tv_switch.switchid, FlowMod4}],
   % log
@@ -463,7 +464,7 @@ metadata_init_action(vid, FlowMod) ->
   PushVlanTagAction = #ofp_action_push_vlan{ethertype = 16#8100},
   InstructionList1 = flow_instruction_add_apply_action(InstructionList, PushVlanTagAction),
   % set vlan id to 0
-  SetVlanIdAction = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<128, 0:5>>}},
+  SetVlanIdAction = #ofp_action_set_field{field = #ofp_field{name = vlan_vid, value = <<128, 6:5>>, has_mask = false, mask = <<128, 0:5>>}},
   InstructionList2 = flow_instruction_add_apply_action(InstructionList1, SetVlanIdAction),
   FlowMod#ofp_flow_mod{
     instructions = InstructionList2
@@ -485,10 +486,12 @@ metadata_concluding_action(vid, FlowMod) ->
   PopVlanTagAction = #ofp_action_pop_vlan{},
   NewInstructions = flow_instruction_add_apply_action(FlowMod#ofp_flow_mod.instructions, PopVlanTagAction),
   OtherMatches = FlowMod#ofp_flow_mod.match#ofp_match.fields,
-  EthertypeMatch = #ofp_field{class = openflow_basic, name = eth_type, value = <<129, 0>>},
-  VidMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<128, 0:5>>, has_mask = true, mask = <<128, 0:5>>},
+%%  EthertypeMatch = #ofp_field{class = openflow_basic, name = eth_type, value = <<129, 0>>},
+  VidMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<128, 0:5>>, has_mask = false, mask = <<128, 0:5>>},
   FlowMod#ofp_flow_mod{
-    match = #ofp_match{fields = OtherMatches ++ ([EthertypeMatch] ++ [VidMatch])},
+    match = #ofp_match{fields = OtherMatches ++ (
+%%          [EthertypeMatch] ++
+          [VidMatch])},
     instructions = NewInstructions
   }.
 
@@ -541,7 +544,7 @@ flow_instruction_add_output(InstructionList, Outport) ->
   % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
   FilteredInstructionList = [I || I <- InstructionList, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
   % filter all output-actions form apply-actions
-  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
+  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = [OutputAction] ++ ApplyActionInstruction#ofp_instruction_apply_actions.actions},
   % create final instruction by filtered instructions without goto-table-instruction
   %    + refactored apply-action-instruction
   FilteredInstructionList ++ [FinalApplyActionInstruction].
@@ -667,8 +670,8 @@ metadata_add_metadata_provider_match(OtherMatches1, vid, MetadataMatch) ->
   OtherMatches2 = [Match || Match <- OtherMatches1, Match#ofp_field.name /= vlan_vid],
   % create vid match
   <<_:52, MetadataValue:12>> = MetadataMatch#ofp_field.value,
-  <<_:52, MetadataMask:12>> = MetadataMatch#ofp_field.mask,
-  TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = MetadataMatch#ofp_field.has_mask, mask = <<(MetadataMask + 16#1000):13>>},
+%%  <<_:52, MetadataMask:12>> = MetadataMatch#ofp_field.mask,
+  TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = false },
   OtherMatches2 ++ [TranslatedMatch].
 
 % remove flowmod set mac address action
@@ -1016,6 +1019,9 @@ tablevisor_logformat_flow_match([], Reply) ->
   Reply;
 tablevisor_logformat_flow_match([#ofp_field{name = in_port, value = Value} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("In Port: ~p", [binary_to_int(Value)])],
+  tablevisor_logformat_flow_match(Matches, Reply2);
+tablevisor_logformat_flow_match([#ofp_field{name = metadata, value = Value, mask = undefined} | Matches], Reply) ->
+  Reply2 = Reply ++ [io_lib:format("Metadata: ~s", [binary_to_metadata(Value)])],
   tablevisor_logformat_flow_match(Matches, Reply2);
 tablevisor_logformat_flow_match([#ofp_field{name = metadata, value = Value, mask = Mask} | Matches], Reply) ->
   Reply2 = Reply ++ [io_lib:format("Metadata: ~s/~s", [binary_to_metadata(Value), binary_to_metadata(Mask)])],
@@ -1489,14 +1495,14 @@ tablevisor_init_gototable_flows(TVSwitch) ->
       FlowModList = [
         begin
           #ofp_flow_mod{
-            table_id = TVSwitch#tv_switch.tableid,
+            table_id = TVSwitch#tv_switch.processtable,
             command = add,
             hard_timeout = 0,
             idle_timeout = 0,
             priority = 254,
             flags = [send_flow_rem],
             match = #ofp_match{fields = [
-              #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.tableid):64>>, mask = <<255:64>>, has_mask = true}
+              #ofp_field{name = metadata, value = <<(NextSwitch#tv_switch.switchid):64>>, mask = <<255:64>>, has_mask = false}
             ]},
             instructions = flow_instruction_add_output([], Outport)
           }
@@ -1508,7 +1514,7 @@ tablevisor_init_gototable_flows(TVSwitch) ->
         case lists:member(0, TVSwitch#tv_switch.priority) of
           false ->
             [#ofp_flow_mod{
-              table_id = TVSwitch#tv_switch.tableid,
+              table_id = TVSwitch#tv_switch.processtable,
               command = add,
               hard_timeout = 0,
               idle_timeout = 0,

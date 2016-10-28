@@ -137,11 +137,11 @@ send_features_request(Socket, Pid) ->
   do_send(Socket, Message),
   receive
     {msg, Reply, Xid} ->
-      lager:info("Received features reply from ~p, message ~p", [Socket, Reply]),
       tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket]),
       Body = Reply#ofp_message.body,
       DataPathMac = Body#ofp_features_reply.datapath_mac,
       DataPathId = binary_to_int(DataPathMac),
+      lager:info("Received features reply from ~p, message ~p, dpid ~p", [Socket, Reply, DataPathId]),
       tablevisor_us4:tablevisor_log("~sReceived ~sfeatures-reply~s from socket ~p (dpid ~.16B)", [tablevisor_us4:tvlc(green), tablevisor_us4:tvlc(green, b), tablevisor_us4:tvlc(green), Socket, DataPathId]),
       {ok, SwitchId} = tablevisor_switch_connect(DataPathId, Socket, Pid),
       lager:info("Registered new Switch DataPath-ID ~.16B, Socket ~p, Pid ~p, Switch-Id ~p", [DataPathId, Socket, Pid, SwitchId]),
@@ -411,7 +411,7 @@ tablevisor_wait_for_switches([]) ->
 %%%-----------------------------------------------------------------------------
 
 tablevisor_topology_discovery() ->
-  Timeout = 2, % Timeout in seconds
+  Timeout = 3, % Timeout in seconds
   tablevisor_topology_discovery_flowmod(Timeout),
   % sleep timer for slow router boards with very large table features reply
   timer:sleep(3000),
@@ -419,7 +419,7 @@ tablevisor_topology_discovery() ->
   tablevisor_topology_discovery_lldp(),
   timer:sleep(Timeout * 1000),
   ConnectionList = tablevisor_topology_discovery_fetcher(ReceiverPidList),
-  lager:debug("Discovered connections: ~p", [ConnectionList]),
+  lager:info("Discovered connections: ~p", [ConnectionList]),
   Graph = tablevisor_topology_discovery_build_digraph(ConnectionList),
   tablevisor_topology_discovery_apply(Graph).
 
@@ -480,16 +480,17 @@ tablevisor_topology_discovery_receiver(SwitchId, ConnectionList) ->
       case Reply of
         #ofp_message{body = #ofp_packet_in{}} ->
           Pkt = pkt2:decapsulate(Reply#ofp_message.body#ofp_packet_in.data),
-          L3Pdu = lists:nth(2, Pkt),
-          case L3Pdu of
-            #lldp{} ->
+          % search for lldp
+          LldpPkt = [P || P <- Pkt, is_record(P, lldp)],
+          case LldpPkt of
+            [] ->
+              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList);
+            [L3Pdu | _] ->
               [IngressPort | _] = [binary_to_int(F#ofp_field.value) || F <- Reply#ofp_message.body#ofp_packet_in.match#ofp_match.fields, is_record(F, ofp_field) andalso F#ofp_field.name =:= in_port],
               [SrcSwitchId | _] = [binary_to_int(F#chassis_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, chassis_id)],
               [EgressPort | _] = [binary_to_int(F#port_id.value) || F <- L3Pdu#lldp.pdus, is_record(F, port_id)],
-              lager:debug("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [SwitchId, IngressPort, SrcSwitchId, EgressPort]),
-              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList ++ [{{SrcSwitchId, EgressPort}, {SwitchId, IngressPort}}]);
-            _ ->
-              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList)
+              lager:info("LLDP Packet in Switch ~p in Port ~p from Switch ~p from Port ~p", [SwitchId, IngressPort, SrcSwitchId, EgressPort]),
+              tablevisor_topology_discovery_receiver(SwitchId, ConnectionList ++ [{{SrcSwitchId, EgressPort}, {SwitchId, IngressPort}}])
           end;
         _ ->
           tablevisor_topology_discovery_receiver(SwitchId, ConnectionList)
@@ -549,7 +550,7 @@ tablevisor_topology_discovery_fetcher([ReceiverPid | ReceiverPidList], Connectio
     end,
   tablevisor_topology_discovery_fetcher(ReceiverPidList, ConnectionList ++ NewConnections);
 tablevisor_topology_discovery_fetcher([], ConnectionList) ->
-  ConnectionList.
+  lists:reverse(ConnectionList).
 
 tablevisor_topology_discovery_build_digraph(ConnectionList) ->
   G = digraph:new(),
