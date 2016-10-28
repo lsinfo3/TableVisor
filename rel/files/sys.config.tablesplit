@@ -1,0 +1,136 @@
+[
+  {linc, [
+    {of_config, enabled},
+    {capable_switch_ports, [
+      {port, 1, [{interface, "tap0"}]},
+      {port, 2, [{interface, "tap1"}]}
+    ]},
+    {capable_switch_queues, []},
+    {logical_switches, [
+      {switch, 0, [
+        {backend, tablevisor_us4},
+        {controllers, [
+          {"Switch0-DefaultController", "localhost", 6653, tcp}
+        ]},
+        {controllers_listener, disabled},
+        {queues_status, disabled},
+        {datapath_id, "00:00:00:00:00:00:00:01"},
+        {ports, []},
+        {tablevisor_switches, [
+          % ls3switch-hpsdn52:
+          % ls3switch-hpsdn53: 229521388609664
+          % ls3switch-hpsdn54: 229521388592448
+          % ls3switch-hpsdn55:
+          {switch, 21, [
+            {tableid, 0},
+ %           {priority, {10, 255}},
+            {dpid, 229521388609664},
+            {processtable, 100}
+          ]},
+          {switch, 22, [
+            {tableid, 1},
+%            {priority, {0, 10}},
+            {dpid, 229521388592448},
+            {processtable, 100}
+          ]}
+        ]},
+        {tablevisor_config, [
+          {metadata_provider, vid},
+          {skip_tables_via_metadata, false}
+        ]}
+      ]}
+    ]}
+  ]},
+
+  {epcap,
+    %% epcap is a LINC dependency that reads packets from the eth interfaces (not
+    %% tap interfaces). It's a wrapper for pcap.
+    [
+      %% Setting this option to true will enable logging in libpcap. The log
+      %% messages will be printed to:
+      %%    a. rel/linc/log/erlang.log.N file when started as daemon (more
+      %%       information here: http://www.erlang.org/doc/man/run_erl.html under
+      %%       "Notes concerning the log files"),
+      %%    b. the application console when started in console mode.
+      {verbose, false},
+      %% This options sets interval of printing pcap statistics. The value is in
+      %% seconds.
+      %% NOTE: This option will have effect ONLY if verbose is set to true.
+      {stats_interval, 10}
+      %% This option allows manipulating internal buffer size of pcap. By
+      %% increasing this buffer dropping packet can be mitigated. The value is in
+      %% bytes.
+      %% , {buffer_size, 73400320}
+    ]},
+
+  {of_protocol,
+    [
+      %% This flag allows to disable splitting messages into multipart
+      %% messages.
+      %% {no_multipart, true}
+    ]},
+
+  {enetconf,
+    [
+      {capabilities, [{base, {1, 0}},
+        {base, {1, 1}},
+        {startup, {1, 0}},
+        {'writable-running', {1, 0}}]},
+      {callback_module, linc_ofconfig},
+      {sshd_ip, any},
+      {sshd_port, 1830},
+      {sshd_user_passwords,
+        [
+          {"linc", "linc"}
+        ]}
+    ]},
+
+  {lager,
+    [{colored, true},
+      {handlers,
+        [{lager_console_backend, info},
+          %% To enable 'debug' logs on the console change 'info' to 'debug'.
+          %% However that will produce big amount of logs from dependencies.
+          %% To filter them out and display only 'debug' messages from LINC
+          %% application, change the above 'lager_console_backend' into the
+          %% one presented below. Note that all the 'debug' logs can be for
+          %% example redirected to a file by setting appropriate log level
+          %% in the 'lager_file_backend'.
+          %% {lager_console_backend,
+          %%  [debug,
+          %%   {lager_default_formatter,
+          %%    [{linc,
+          %%      [time, " [", severity, "] ", message, "\n"],
+          %%      [""]}]
+          %%   }]
+          %% },
+          {lager_file_backend, [{file, "log/error.log"}, {level, error},
+            {size, 10485760}, {date, "$D0"}, {count, 5}]},
+          {lager_file_backend, [{file, "log/console.log"}, {level, info},
+            {size, 10485760}, {date, "$D0"}, {count, 5}]},
+          {lager_file_backend, [{file, "log/debug.log"}, {level, debug},
+            {size, 10485760}, {date, "$D0"}, {count, 5}]}
+        ]}
+    ]},
+
+  {sasl,
+    [
+      {sasl_error_logger, {file, "log/sasl-error.log"}},
+      {errlog_type, error},
+      {error_logger_mf_dir, "log/sasl"},      % Log directory
+      {error_logger_mf_maxbytes, 10485760},   % 10 MB max file size
+      {error_logger_mf_maxfiles, 5}           % 5 files max
+    ]},
+
+  {sync,
+    %% Sync is a developer utility that reloads changed beam files into the VM
+    %% without the need to restart it. It is started when the Makefile's dev
+    %% target is invoked to start the development environment.
+    [
+      %% By default only the procket module is excluded from the scan process
+      %% as it does not support reloading.
+      {excluded_modules, [procket]}
+    ]}
+
+
+].
