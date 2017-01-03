@@ -17,26 +17,33 @@
         {datapath_id, "00:00:00:00:00:00:00:01"},
         {ports, []},
         {tablevisor_switches, [
-          % ls3switch-hpsdn52:
-          % ls3switch-hpsdn53: 229521388609664
-          % ls3switch-hpsdn54: 229521388592448
-          % ls3switch-hpsdn55:
-          {switch, 21, [
+          {switch, 1, [
             {tableid, 0},
- %           {priority, {10, 255}},
-            {dpid, 229521388609664},
-            {processtable, 100}
+            {priority, {100, 255}},
+            {dpid, 10},
+            {processtable, 0}
           ]},
-          {switch, 22, [
+          {switch, 2, [
+            {tableid, 0},
+            {priority, {100, 100}},
+            {dpid, 11},
+            {processtable, 0}
+          ]},
+          {switch, 3, [
+            {tableid, 0},
+            {priority, {0, 100}},
+            {dpid, 12},
+            {processtable, 0}
+          ]},
+          {switch, 4, [
             {tableid, 1},
-%            {priority, {0, 10}},
-            {dpid, 229521388592448},
-            {processtable, 100}
+            {dpid, 13},
+            {processtable, 0}
           ]}
         ]},
         {tablevisor_config, [
-          {metadata_provider, vid},
-          {skip_tables_via_metadata, false}
+          {metadata_provider, srcmac}, %% srcmac, dstmac, vid
+          {skip_tables_via_metadata, true}
         ]}
       ]}
     ]}

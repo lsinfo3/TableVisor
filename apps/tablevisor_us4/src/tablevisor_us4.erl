@@ -305,7 +305,7 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
 %%  lager:warning("FlowMod3 ~p", [FlowMod3]),
   % preprocess metadata
   FlowMod4 = ofp_flow_mod_metadata_postprocess(FlowMod3, TVSwitch),
-%%  lager:warning("FlowMod4 ~p", [FlowMod3]),
+%%  lager:warning("FlowMod4 ~p", [FlowMod4]),
   % build request
   Requests = [{TVSwitch#tv_switch.switchid, FlowMod4}],
   % log
@@ -363,10 +363,11 @@ ofp_flow_mod_refactor_output_by_metadata(FlowMod1, TVSwitch) ->
       % try to get outport for target table
       NextSwitch = tablevisor_ctrl4:tablevisor_switch_get_next(TVSwitch),
       Outport = tablevisor_ctrl4:tablevisor_switch_get_outport(TVSwitch, NextSwitch),
+      TargetSwitch = tablevisor_ctrl4:tablevisor_switch_get(GotoTableInstruction#ofp_instruction_goto_table.table_id, tableid),
       case is_integer(Outport) of
         true ->
-          FlowMod2 = FlowMod1#ofp_flow_mod{instructions = flow_instruction_add_output(FlowMod1#ofp_flow_mod.instructions, Outport)},
-          FlowMod3 = FlowMod2#ofp_flow_mod{instructions = flow_instruction_add_write_metadata(FlowMod2#ofp_flow_mod.instructions, GotoTableInstruction#ofp_instruction_goto_table.table_id, 16#FF)},
+          FlowMod2 = FlowMod1#ofp_flow_mod{instructions = flow_instruction_add_write_metadata(FlowMod1#ofp_flow_mod.instructions, TargetSwitch#tv_switch.switchid, 16#FF)},
+          FlowMod3 = FlowMod2#ofp_flow_mod{instructions = flow_instruction_add_output(FlowMod2#ofp_flow_mod.instructions, Outport)},
           FlowMod3;
         _ ->
           FlowMod1
@@ -491,7 +492,7 @@ metadata_concluding_action(vid, FlowMod) ->
   FlowMod#ofp_flow_mod{
     match = #ofp_match{fields = OtherMatches ++ (
 %%          [EthertypeMatch] ++
-          [VidMatch])},
+        [VidMatch])},
     instructions = NewInstructions
   }.
 
@@ -544,7 +545,7 @@ flow_instruction_add_output(InstructionList, Outport) ->
   % lager:info("Instructions ~p", [FlowMod2#ofp_flow_mod.instructions]),
   FilteredInstructionList = [I || I <- InstructionList, not(is_record(I, ofp_instruction_goto_table)) and not(is_record(I, ofp_instruction_apply_actions))],
   % filter all output-actions form apply-actions
-  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = [OutputAction] ++ ApplyActionInstruction#ofp_instruction_apply_actions.actions},
+  FinalApplyActionInstruction = ApplyActionInstruction#ofp_instruction_apply_actions{actions = ApplyActionInstruction#ofp_instruction_apply_actions.actions ++ [OutputAction]},
   % create final instruction by filtered instructions without goto-table-instruction
   %    + refactored apply-action-instruction
   FilteredInstructionList ++ [FinalApplyActionInstruction].
@@ -563,7 +564,7 @@ flow_instruction_add_apply_action(InstructionList1, NewAction) ->
     end,
   % add new apply action
   ApplyInstruction2 = ApplyInstruction1#ofp_instruction_apply_actions{
-    actions = ApplyInstruction1#ofp_instruction_apply_actions.actions ++ [NewAction]
+    actions = [NewAction] ++ ApplyInstruction1#ofp_instruction_apply_actions.actions
   },
   % remove apply actions
   InstructionList2 = [Instruction || Instruction <- InstructionList1,
@@ -671,7 +672,7 @@ metadata_add_metadata_provider_match(OtherMatches1, vid, MetadataMatch) ->
   % create vid match
   <<_:52, MetadataValue:12>> = MetadataMatch#ofp_field.value,
 %%  <<_:52, MetadataMask:12>> = MetadataMatch#ofp_field.mask,
-  TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = false },
+  TranslatedMatch = #ofp_field{class = openflow_basic, name = vlan_vid, value = <<(MetadataValue + 16#1000):13>>, has_mask = false},
   OtherMatches2 ++ [TranslatedMatch].
 
 % remove flowmod set mac address action

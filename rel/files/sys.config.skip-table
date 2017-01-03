@@ -40,7 +40,7 @@
         ]},
         {tablevisor_config, [
           {metadata_provider, srcmac}, %% srcmac, dstmac, vid
-          {skip_tables_via_metadata, false}
+          {skip_tables_via_metadata, true}
         ]}
       ]}
     ]}
