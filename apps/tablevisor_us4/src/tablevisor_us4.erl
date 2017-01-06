@@ -798,6 +798,17 @@ ofp_set_config(State, #ofp_set_config{flags = Flags,
 -spec ofp_barrier_request(state(), ofp_barrier_request()) ->
   {reply, ofp_barrier_reply(), #state{}}.
 ofp_barrier_request(State, #ofp_barrier_request{}) ->
+  tablevisor_log("~sReceived ~sbarrier-request~s from controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
+  lager:info("ofp_barrier_request to tablevisor"),
+  SwitchList = tablevisor_ctrl4:tablevisor_switch_get(),
+  SwitchIdList = [TVSwitch#tv_switch.switchid || TVSwitch <- SwitchList],
+  % build requests
+  Requests = [{SwitchId, #ofp_barrier_request{}} || SwitchId <- SwitchIdList],
+  % send requests and receives replies
+  Replies = tablevisor_ctrl4:tablevisor_multi_request(Requests, 2000),
+  lager:warning("barrier replies: ~p", [Replies]),
+  tablevisor_log("~sSend ~sbarrier-reply~s to controller", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow)]),
+  lager:info("ofp_barrier_reply from tablevisor"),
   BarrierReply = #ofp_barrier_reply{},
   {reply, BarrierReply, State}.
 
