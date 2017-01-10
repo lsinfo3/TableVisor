@@ -34,7 +34,8 @@
   set_monitor_data/3]).
 
 %% Handle all message types
--export([ofp_features_request/2,
+-export([
+  ofp_features_request/2,
   ofp_flow_mod/2,
   ofp_table_mod/2,
   ofp_port_mod/2,
@@ -59,7 +60,8 @@
   ofp_meter_mod/2,
   ofp_meter_stats_request/2,
   ofp_meter_config_request/2,
-  ofp_meter_features_request/2]).
+  ofp_meter_features_request/2
+]).
 
 %% Handle messages for tablevisor
 -export([
@@ -77,8 +79,6 @@
   ofp_packet_in/2
 ]).
 
-
-
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("linc/include/linc_logger.hrl").
@@ -94,6 +94,8 @@
   [switch_config_opt()]
 }).
 -type state() :: #state{}.
+
+-define(EXTENDED_LOG, false).
 
 -type switch_config_opt() :: {flags, list(ofp_config_flags())} |
 {miss_send_len, ofp_packet_in_bytes()}.
@@ -292,9 +294,13 @@ ofp_features_request(#state{switch_id = SwitchId,
   {noreply, #state{}} |
   {reply, ofp_message(), #state{}}.
 ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = TableId} = FlowMod) ->
-  LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
-  tablevisor_log("~sReceived ~sflow-mod~s from controller for table ~w:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), TableId, LogFlow1]),
-  lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]),
+  case ?EXTENDED_LOG of
+    true ->
+      LogFlow1 = tablevisor_logformat_flowmod(FlowMod),
+      tablevisor_log("~sReceived ~sflow-mod~s from controller for table ~w:~s", [tvlc(yellow), tvlc(yellow, b), tvlc(yellow), TableId, LogFlow1]),
+      lager:info("ofp_flow_mod to tablevisor-switch ~p: ~p", [TableId, FlowMod]);
+    _ -> false
+  end,
   % get table id list
   TVSwitch = ofp_flow_mod_get_switch(FlowMod),
   % preprocess metadata
@@ -309,11 +315,14 @@ ofp_flow_mod(#state{switch_id = _SwitchId} = State, #ofp_flow_mod{table_id = Tab
   % build request
   Requests = [{TVSwitch#tv_switch.switchid, FlowMod4}],
   % log
-  [begin
-     LogFlow = tablevisor_logformat_flowmod(FlowModL),
-     tablevisor_log("~sSend ~sflow-mod~s to switch ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), SwitchId, LogFlow])
-   end
-    || {SwitchId, FlowModL} <- Requests],
+  case ?EXTENDED_LOG of
+    true ->
+      [begin
+         LogFlow = tablevisor_logformat_flowmod(FlowModL),
+         tablevisor_log("~sSend ~sflow-mod~s to switch ~w:~s", [tvlc(blue), tvlc(blue, b), tvlc(blue), SwitchId, LogFlow])
+       end || {SwitchId, FlowModL} <- Requests];
+    _ -> false
+  end,
   % send requests and receives replies
   tablevisor_ctrl4:tablevisor_multi_request(Requests),
   {noreply, State}.

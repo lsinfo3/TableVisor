@@ -17,6 +17,8 @@
 
 -compile([{parse_transform, lager_transform}]).
 
+-define(EXTENDED_LOG, false).
+
 %% API
 -export([
   start/1,
@@ -704,17 +706,29 @@ tablevisor_multi_receiver(N, Timeout, Caller, Replies) ->
   end.
 
 tablevisor_transmitter(SwitchId, Request, Timeout, ReceiverPid) ->
-  lager:debug("send to ~p with message ~p", [SwitchId, Request]),
+  case ?EXTENDED_LOG of
+    true ->
+      lager:debug("send to ~p with message ~p", [SwitchId, Request]);
+    _ -> false
+  end,
   % convert request to valid OpenFlow message
   Message = tablevisor_ctrl4:message(Request),
   % send the request and wait for reply
   {reply, Reply} = tablevisor_ctrl4:send(SwitchId, Message, Timeout),
   % return reply to receiver
-  lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]),
+  case ?EXTENDED_LOG of
+    true ->
+      lager:debug("sending reply to ~p: ~p", [ReceiverPid, Reply]);
+    _ -> false
+  end,
   ReceiverPid ! {ok, SwitchId, Reply}.
 
 tablevisor_transmitter(TableId, Request) ->
-  lager:info("send to ~p with message ~p", [TableId, Request]),
+  case ?EXTENDED_LOG of
+    true ->
+      lager:info("send to ~p with message ~p", [TableId, Request]);
+    _ -> false
+  end,
   % convert request to valid OpenFlow message
   Message = tablevisor_ctrl4:message(Request),
   % send the request and wait for reply
